@@ -1,0 +1,37 @@
+# ---- Staging overrides ----
+global:
+  environment: stage
+
+config:
+  logLevel: info
+  accessTokenExpireMinutes: "240"
+  corsOrigins: "https://employee.stage.sidhuge.xyz"
+
+# Prefer an externally-managed Secret in staging/prod.
+secrets:
+  create: true
+  # existingSecret: employee-management-secret
+
+podAntiAffinity: soft
+
+frontend:
+  replicaCount: 3
+  autoscaling: { enabled: true, minReplicas: 3, maxReplicas: 8 }
+
+backend:
+  replicaCount: 3
+  autoscaling: { enabled: true, minReplicas: 3, maxReplicas: 8 }
+
+postgres:
+  persistence:
+    size: 5Gi
+    # storageClass: managed-premium
+
+ingress:
+  host: employee.stage.sidhuge.xyz
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+  tls:
+    enabled: true
+    secretName: employee-stage-tls

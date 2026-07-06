@@ -1,0 +1,36 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Tests & dev-only deps (keep runtime image minimal)
+app/tests/
+requirements-dev.txt
+
+# Secrets & local env
+.env
+.env.*
+!.env.example
+
+# VCS / CI metadata
+.git/
+.gitignore
+.github/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.log
+
+# Build/scan artifacts
+sbom/
+reports/

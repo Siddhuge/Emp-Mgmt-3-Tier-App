@@ -1,0 +1,34 @@
+
+{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}" (environment: {{ .Values.global.environment }}).
+
+Components:
+  • Frontend : {{ if .Values.frontend.autoscaling.enabled }}{{ .Values.frontend.autoscaling.minReplicas }}-{{ .Values.frontend.autoscaling.maxReplicas }} pods (HPA){{ else }}{{ .Values.frontend.replicaCount }} pods{{ end }}
+  • Backend  : {{ if .Values.backend.autoscaling.enabled }}{{ .Values.backend.autoscaling.minReplicas }}-{{ .Values.backend.autoscaling.maxReplicas }} pods (HPA){{ else }}{{ .Values.backend.replicaCount }} pods{{ end }}
+  • Database : PostgreSQL StatefulSet ({{ .Values.postgres.persistence.size }} PVC{{ if .Values.postgres.persistence.storageClass }}, class {{ .Values.postgres.persistence.storageClass }}{{ end }})
+
+1. Watch the rollout:
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "ems.componentName" (dict "ctx" . "component" "backend") }}
+   kubectl -n {{ .Release.Namespace }} get pods -o wide
+
+2. Reach the application:
+{{- if .Values.ingress.enabled }}
+   Host: {{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}
+   • UI     -> /
+   • API    -> /api  (e.g. POST /api/login)
+
+   For a local kind/minikube cluster, map the host to the ingress IP, e.g.:
+     echo "127.0.0.1 {{ .Values.ingress.host }}" | sudo tee -a /etc/hosts
+     curl -H "Host: {{ .Values.ingress.host }}" http://<ingress-ip>/api/dashboard
+{{- else }}
+   Ingress is disabled. Port-forward the frontend service:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "ems.componentName" (dict "ctx" . "component" "frontend") }} 8080:{{ .Values.frontend.service.port }}
+{{- end }}
+
+3. Default admin login: {{ .Values.config.seedAdminUsername }} / (value of secrets.seedAdminPassword)
+
+{{- if not .Values.secrets.create }}
+
+⚠  secrets.create=false — this release expects an existing Secret named
+   "{{ .Values.secrets.existingSecret }}" with keys: POSTGRES_PASSWORD, DATABASE_URL,
+   JWT_SECRET, SEED_ADMIN_PASSWORD.
+{{- end }}

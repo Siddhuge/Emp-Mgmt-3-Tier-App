@@ -1,0 +1,54 @@
+# ---- Development overrides (sized to run on a local kind cluster) ----
+global:
+  environment: dev
+
+config:
+  logLevel: debug
+  accessTokenExpireMinutes: "480"
+  corsOrigins: "http://employee.dev.sidhuge.xyz,http://localhost:8080"
+
+secrets:
+  jwtSecret: "dev-jwt-secret-not-for-production"
+  postgresPassword: "dev-postgres-password"
+  seedAdminPassword: "admin123"
+
+podAntiAffinity: soft
+
+frontend:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 250m, memory: 256Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+
+backend:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+
+postgres:
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  persistence:
+    size: 1Gi
+
+ingress:
+  host: employee.dev.sidhuge.xyz
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  tls:
+    enabled: true
+    secretName: employee-dev-tls
+
+networkPolicy:
+  enabled: true

@@ -1,0 +1,146 @@
+# =============================================================================
+# Production-ready Docker Compose.
+#
+#   Load an environment file explicitly, e.g.:
+#     docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+#
+# Images are referenced by immutable version tags (never :latest). Build them
+# with scripts/build.sh (or `docker compose -f docker-compose.prod.yml build`).
+# Startup is dependency-aware: db (healthy) -> backend (healthy) -> frontend.
+# =============================================================================
+
+services:
+  db:
+    image: ${REGISTRY:-employee-management}/database-init:${VERSION:-dev}
+    build:
+      context: ./database
+      args:
+        VERSION: ${VERSION:-dev}
+    container_name: ems_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-employee_db}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    # Not exposed to the host in production; only reachable on the internal network.
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-employee_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Capabilities the postgres entrypoint needs to drop privileges / fix perms.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    tmpfs:
+      - /tmp
+      - /run/postgresql
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits:
+          cpus: "${DB_CPU_LIMIT:-1.0}"
+          memory: ${DB_MEM_LIMIT:-512M}
+    networks:
+      - ems
+
+  backend:
+    image: ${REGISTRY:-employee-management}/backend:${VERSION:-dev}
+    build:
+      context: ./backend
+      args:
+        VERSION: ${VERSION:-dev}
+        VCS_REF: ${VCS_REF:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    container_name: ems_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/employee_db}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD must be set}
+    expose:
+      - "8000"
+    # Optionally publish for debugging; comment out to keep backend internal-only.
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits:
+          cpus: "${BACKEND_CPU_LIMIT:-1.0}"
+          memory: ${BACKEND_MEM_LIMIT:-512M}
+    networks:
+      - ems
+
+  frontend:
+    image: ${REGISTRY:-employee-management}/frontend:${VERSION:-dev}
+    build:
+      context: ./frontend
+      args:
+        VERSION: ${VERSION:-dev}
+        VCS_REF: ${VCS_REF:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    container_name: ems_frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /run
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits:
+          cpus: "${FRONTEND_CPU_LIMIT:-0.5}"
+          memory: ${FRONTEND_MEM_LIMIT:-128M}
+    networks:
+      - ems
+
+volumes:
+  db_data:
+
+networks:
+  ems:
+    driver: bridge

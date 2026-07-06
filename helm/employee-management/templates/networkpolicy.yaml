@@ -1,0 +1,128 @@
+{{- if .Values.networkPolicy.enabled -}}
+{{- $ingressNs := .Values.networkPolicy.ingressControllerNamespace -}}
+# Default-deny for every pod in the namespace; explicit allows follow below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ems.fullname" . }}-default-deny
+  labels:
+    {{- include "ems.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# Allow DNS resolution (egress to kube-dns) for all pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ems.fullname" . }}-allow-dns
+  labels:
+    {{- include "ems.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Internet/Ingress -> Frontend (8080)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ems.fullname" . }}-frontend
+  labels:
+    {{- include "ems.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ems.selectorLabels" (dict "ctx" . "component" "frontend") | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $ingressNs }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.frontend.containerPort }} }
+  egress:
+    # Frontend proxies /api to the backend.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ems.selectorLabels" (dict "ctx" . "component" "backend") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.backend.containerPort }} }
+---
+# Frontend + Ingress -> Backend (8000)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ems.fullname" . }}-backend
+  labels:
+    {{- include "ems.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ems.selectorLabels" (dict "ctx" . "component" "backend") | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ems.selectorLabels" (dict "ctx" . "component" "frontend") | nindent 14 }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $ingressNs }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.backend.containerPort }} }
+  egress:
+    # Backend talks only to PostgreSQL.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ems.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.postgres.service.port }} }
+---
+# Backend -> PostgreSQL (5432)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ems.fullname" . }}-postgres
+  labels:
+    {{- include "ems.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ems.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ems.selectorLabels" (dict "ctx" . "component" "backend") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.postgres.service.port }} }
+---
+# Allow the ingress controller to reach cert-manager HTTP-01 ACME solver pods.
+# Without this, default-deny blocks the ACME challenge and TLS issuance stalls.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ems.fullname" . }}-acme-solver
+  labels:
+    {{- include "ems.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      acme.cert-manager.io/http01-solver: "true"
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $ingressNs }}
+{{- end -}}

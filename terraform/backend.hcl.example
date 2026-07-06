@@ -1,0 +1,7 @@
+# Shared remote-state backend settings (Option B).
+# Copy to backend.hcl (or let scripts/bootstrap-state.sh generate it).
+# Contains no secrets — safe to commit so the whole team inits the same backend.
+# The per-environment `key` (dev.tfstate / test.tfstate) is passed separately.
+resource_group_name  = "rg-tfstate-emp"
+storage_account_name = "sttfempXXXXX" # globally unique; set by bootstrap
+container_name       = "tfstate"

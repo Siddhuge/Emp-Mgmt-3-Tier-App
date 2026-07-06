@@ -1,0 +1,8 @@
+# Accepted vulnerabilities (reviewed). Keep this list short and justified.
+# Format: one CVE id per line. Re-review each release.
+
+# CVE-2025-68121 — Go stdlib in `gosu`, shipped inside the official
+# postgres:16-alpine image. gosu only runs at container start to drop root to
+# the postgres user; it is not network-facing. No fixed postgres-alpine tag
+# ships a rebuilt gosu yet. Revisit on the next PostgreSQL base-image bump.
+CVE-2025-68121

@@ -1,0 +1,19 @@
+{{- range $component := (list "frontend" "backend" "postgres") -}}
+{{- $cfg := index $.Values $component -}}
+{{- if and $cfg.enabled $cfg.pdb $cfg.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ems.componentName" (dict "ctx" $ "component" $component) }}
+  labels:
+    {{- include "ems.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  # Keep this many pods available during voluntary disruptions (drains/upgrades).
+  minAvailable: {{ $cfg.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "ems.selectorLabels" (dict "ctx" $ "component" $component) | nindent 6 }}
+{{- end }}
+{{- end -}}

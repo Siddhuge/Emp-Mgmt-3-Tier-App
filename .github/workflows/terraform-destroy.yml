@@ -1,0 +1,40 @@
+# Manual, guarded teardown. Requires typing the environment name to confirm,
+# and still passes through the environment's approval gate.
+name: terraform-destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to DESTROY"
+        type: choice
+        options: [dev, test]
+        required: true
+      confirm:
+        description: 'Type the environment name to confirm (e.g. "dev")'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify confirmation matches the target environment
+        run: |
+          if [ "${{ inputs.confirm }}" != "${{ inputs.environment }}" ]; then
+            echo "::error::Confirmation '${{ inputs.confirm }}' does not match environment '${{ inputs.environment }}'."
+            exit 1
+          fi
+
+  destroy:
+    needs: guard
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      environment: ${{ inputs.environment }}
+      destroy: true
+    secrets: inherit

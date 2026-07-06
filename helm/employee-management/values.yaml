@@ -1,0 +1,202 @@
+# =============================================================================
+# Default values for the employee-management chart.
+# Override per environment with values-dev.yaml / values-stage.yaml / values-prod.yaml
+# =============================================================================
+
+global:
+  environment: default
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Container registry that hosts the Phase 2 images.
+image:
+  registry: employee-management
+  pullPolicy: IfNotPresent
+
+# ---- Non-secret configuration (rendered into a ConfigMap) ----
+config:
+  # Client-facing API URL. Empty => the frontend uses a relative "/api" path
+  # (served through the same Ingress host), which is the default.
+  apiUrl: ""
+  logLevel: info
+  jwtAlgorithm: HS256
+  accessTokenExpireMinutes: "60"
+  # CORS origins the backend accepts. Same-origin via Ingress needs none, but
+  # keep the ingress host here for direct API access.
+  corsOrigins: "https://employee.sidhuge.xyz"
+  seedAdminUsername: admin
+  featureFlags: "dashboard=true,departments=true"
+
+# ---- Secrets (rendered into a Secret unless existingSecret is set) ----
+# NEVER commit real values. Override at deploy time or use existingSecret.
+secrets:
+  create: true
+  existingSecret: ""
+  jwtSecret: "change-me-in-a-real-deployment"
+  postgresPassword: "change-me-in-a-real-deployment"
+  seedAdminPassword: "change-me-in-a-real-deployment"
+
+# ---- Service account + RBAC ----
+serviceAccount:
+  create: true
+  name: ""
+  # Pods don't call the API server, so don't mount a token by default.
+  automountServiceAccountToken: false
+
+rbac:
+  # Minimal Role/RoleBinding (read access to the app ConfigMap) — illustrates
+  # least-privilege; disable if not needed.
+  create: true
+
+# ---- Pod scheduling defaults (applied to app workloads) ----
+nodeSelector: {}
+tolerations: []
+# Soft anti-affinity: spread replicas across nodes but still schedule if a node
+# is unavailable. Set to "hard" in prod to require spreading.
+podAntiAffinity: soft
+
+# =============================================================================
+# Frontend (React SPA served by nginx)
+# =============================================================================
+frontend:
+  enabled: true
+  image:
+    repository: frontend
+    tag: "1.0.0"
+  replicaCount: 3
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+  containerPort: 8080
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 75
+  pdb:
+    enabled: true
+    minAvailable: 2
+  probes:
+    startup:
+      path: /healthz
+      failureThreshold: 30
+      periodSeconds: 2
+    readiness:
+      path: /healthz
+      initialDelaySeconds: 3
+      periodSeconds: 10
+    liveness:
+      path: /healthz
+      initialDelaySeconds: 5
+      periodSeconds: 15
+
+# =============================================================================
+# Backend (FastAPI)
+# =============================================================================
+backend:
+  enabled: true
+  image:
+    repository: backend
+    tag: "1.0.0"
+  replicaCount: 3
+  service:
+    type: ClusterIP
+    port: 8000
+    targetPort: 8000
+  containerPort: 8000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 75
+  pdb:
+    enabled: true
+    minAvailable: 2
+  # Graceful shutdown: allow in-flight requests to drain before SIGKILL.
+  terminationGracePeriodSeconds: 30
+  probes:
+    startup:
+      path: /health
+      failureThreshold: 30
+      periodSeconds: 2
+    readiness:
+      path: /health
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    liveness:
+      path: /health
+      initialDelaySeconds: 10
+      periodSeconds: 15
+
+# =============================================================================
+# PostgreSQL (StatefulSet with persistent storage)
+# =============================================================================
+postgres:
+  enabled: true
+  image:
+    repository: database-init
+    tag: "1.0.0"
+  auth:
+    username: postgres
+    database: employee_db
+  service:
+    port: 5432
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  persistence:
+    enabled: true
+    # standalone=false => the StatefulSet manages storage via volumeClaimTemplates.
+    # standalone=true  => provision the separate pvc.yaml and mount it instead.
+    standalone: false
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 2Gi
+  pdb:
+    enabled: false
+    minAvailable: 1
+
+# =============================================================================
+# Ingress (NGINX)
+# =============================================================================
+ingress:
+  enabled: true
+  className: nginx
+  host: employee.sidhuge.xyz
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  tls:
+    enabled: false
+    secretName: employee-tls
+
+# =============================================================================
+# Network policies (default-deny + explicit allows)
+# =============================================================================
+networkPolicy:
+  enabled: true
+  # CIDR/selector for the ingress controller namespace. Empty => allow from any
+  # namespace labelled as the ingress namespace (see values-*.yaml).
+  ingressControllerNamespace: ingress-nginx

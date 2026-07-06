@@ -1,0 +1,20 @@
+{{- if and .Values.postgres.enabled .Values.postgres.persistence.enabled .Values.postgres.persistence.standalone -}}
+# Standalone PVC — used only when postgres.persistence.standalone=true.
+# By default the StatefulSet manages storage via volumeClaimTemplates instead.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ems.componentName" (dict "ctx" . "component" "postgres") }}-data
+  labels:
+    {{- include "ems.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  accessModes:
+    {{- toYaml .Values.postgres.persistence.accessModes | nindent 4 }}
+  {{- if .Values.postgres.persistence.storageClass }}
+  storageClassName: {{ .Values.postgres.persistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.postgres.persistence.size }}
+{{- end -}}

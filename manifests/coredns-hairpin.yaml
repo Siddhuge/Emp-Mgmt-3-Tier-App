@@ -1,0 +1,12 @@
+# AKS hairpin workaround for cert-manager HTTP-01 self-checks.
+# A pod cannot reach its own LoadBalancer's public IP on Azure, so we make
+# in-cluster DNS resolve the app host to the ingress controller's ClusterIP.
+# Public DNS (GoDaddy A record -> LB public IP) is unchanged.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  employee-hairpin.override: |
+    rewrite name exact employee.dev.sidhuge.xyz ingress-nginx-controller.ingress-nginx.svc.cluster.local

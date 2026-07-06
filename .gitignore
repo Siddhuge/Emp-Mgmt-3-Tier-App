@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+*.db
+
+# Node
+node_modules/
+frontend/dist/
+.vite/
+
+# Env / secrets (keep only the template)
+.env
+.env.*
+!.env.example
+
+# Supply-chain artifacts
+sbom/
+reports/
+cosign.key
+cosign.pub
+
+# Terraform (keep .terraform.lock.hcl and *.tfvars — they're config, no secrets here)
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+
+# OS / editor
+.DS_Store
+*.log
+
+# Claude Code local settings
+.claude/

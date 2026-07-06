@@ -1,0 +1,72 @@
+# Terraform CI/CD for Azure (AKS dev/test).
+#   Pull request  -> plan dev + test, posted as PR comments (no approval needed)
+#   Push to main  -> apply dev, then test (each gated by GitHub Environment approval)
+#   Manual run    -> apply a chosen environment
+name: terraform-ci
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-*.yml"
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-*.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to apply"
+        type: choice
+        options: [dev, test]
+        default: dev
+
+# Least privilege for the whole pipeline; the reusable workflow narrows further.
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+  security-events: write
+
+jobs:
+  # ---- Pull request: plan every environment (matrix), comment results ----
+  plan:
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, test]
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      environment: ${{ matrix.environment }}
+      apply: false
+    secrets: inherit
+
+  # ---- Merge to main: promote dev -> test, each gated by environment approval ----
+  apply-dev:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      environment: dev
+      apply: true
+    secrets: inherit
+
+  apply-test:
+    if: github.event_name == 'push'
+    needs: apply-dev
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      environment: test
+      apply: true
+    secrets: inherit
+
+  # ---- Manual apply of a single environment ----
+  apply-manual:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      environment: ${{ inputs.environment }}
+      apply: true
+    secrets: inherit

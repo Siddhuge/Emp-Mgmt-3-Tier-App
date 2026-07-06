@@ -1,0 +1,162 @@
+# Reusable Terraform workflow: fmt -> lint -> security scan -> validate -> plan -> (apply).
+# Called by terraform-ci.yml and terraform-destroy.yml. Auth is passwordless (OIDC).
+name: terraform-reusable
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment (dev or test)."
+        type: string
+        required: true
+      apply:
+        description: "Apply the plan (true) or plan-only (false)."
+        type: boolean
+        default: false
+      destroy:
+        description: "Produce/apply a destroy plan instead of a create plan."
+        type: boolean
+        default: false
+      terraform_version:
+        type: string
+        default: "1.9.8"
+      working_directory:
+        type: string
+        default: "terraform"
+
+permissions:
+  contents: read          # checkout
+  id-token: write         # OIDC token for Azure login (no secrets)
+  pull-requests: write    # post the plan as a PR comment
+  security-events: write  # upload Trivy SARIF to code scanning
+
+jobs:
+  terraform:
+    name: "${{ inputs.environment }} · ${{ inputs.destroy && 'destroy' || (inputs.apply && 'apply' || 'plan') }}"
+    runs-on: ubuntu-latest
+
+    # Apply/destroy target the protected environment (required reviewers gate here);
+    # plan-only uses an unprotected "<env>-plan" environment so PRs don't need approval.
+    environment: ${{ (inputs.apply || inputs.destroy) && inputs.environment || format('{0}-plan', inputs.environment) }}
+
+    # Never let two runs touch the same env's state at once.
+    concurrency:
+      group: terraform-${{ inputs.environment }}
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    env:
+      # ---- Azure auth via GitHub OIDC (no client secret stored anywhere) ----
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"            # AAD auth to the state storage (no account keys)
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      # ---- Terraform CI ergonomics ----
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+    steps:
+      # NOTE: action tags shown for readability. For maximum supply-chain safety,
+      # pin each to a full commit SHA and let Dependabot bump them.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Terraform fmt (check)
+        run: terraform fmt -check -recursive
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.53.0
+
+      - name: TFLint
+        run: |
+          tflint --init
+          tflint --recursive --format compact
+
+      - name: Trivy IaC security scan (SARIF)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: ${{ inputs.working_directory }}
+          format: sarif
+          output: trivy-iac.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "0"   # report, don't hard-fail the pipeline on infra findings
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: ${{ inputs.working_directory }}/trivy-iac.sarif
+          category: trivy-iac-${{ inputs.environment }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform init
+        run: |
+          terraform init -reconfigure \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RG }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_SA }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=${{ inputs.environment }}.tfstate"
+
+      - name: Terraform validate
+        run: terraform validate -no-color
+
+      - name: Terraform plan
+        id: plan
+        run: |
+          terraform plan -no-color -lock-timeout=5m \
+            -var-file="${{ inputs.environment }}.tfvars" \
+            ${{ inputs.destroy && '-destroy' || '' }} \
+            -out=tfplan
+          terraform show -no-color tfplan > plan.txt
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const dir = '${{ inputs.working_directory }}';
+            let plan = fs.readFileSync(`${dir}/plan.txt`, 'utf8');
+            const max = 63000;
+            if (plan.length > max) plan = plan.slice(0, max) + '\n... (truncated, see job log)';
+            const marker = `<!-- tf-plan:${{ inputs.environment }} -->`;
+            const body = `${marker}\n### Terraform plan — \`${{ inputs.environment }}\`\n\n<details><summary>Show plan</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n\n</details>`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body });
+            }
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: ${{ inputs.working_directory }}/tfplan
+          retention-days: 5
+
+      # Apply exactly the plan that was reviewed (plan/apply consistency).
+      - name: Terraform apply
+        if: inputs.apply || inputs.destroy
+        run: terraform apply -no-color -lock-timeout=5m -auto-approve tfplan

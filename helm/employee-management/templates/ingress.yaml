@@ -1,0 +1,41 @@
+{{- if .Values.ingress.enabled -}}
+{{- $fe := include "ems.componentName" (dict "ctx" . "component" "frontend") -}}
+{{- $be := include "ems.componentName" (dict "ctx" . "component" "backend") -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "ems.fullname" . }}
+  labels:
+    {{- include "ems.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # Path-based routing: /api -> backend, everything else -> frontend SPA.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $be }}
+                port:
+                  number: {{ .Values.backend.service.port }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fe }}
+                port:
+                  number: {{ .Values.frontend.service.port }}
+{{- end -}}

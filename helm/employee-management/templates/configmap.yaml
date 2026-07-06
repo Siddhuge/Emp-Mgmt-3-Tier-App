@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ems.configMapName" . }}
+  labels:
+    {{- include "ems.labels" . | nindent 4 }}
+data:
+  # ---- Application (non-secret) configuration ----
+  ENVIRONMENT: {{ .Values.global.environment | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  API_URL: {{ .Values.config.apiUrl | quote }}
+  FEATURE_FLAGS: {{ .Values.config.featureFlags | quote }}
+  # ---- Backend settings (consumed via envFrom) ----
+  JWT_ALGORITHM: {{ .Values.config.jwtAlgorithm | quote }}
+  ACCESS_TOKEN_EXPIRE_MINUTES: {{ .Values.config.accessTokenExpireMinutes | quote }}
+  CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
+  SEED_ADMIN_USERNAME: {{ .Values.config.seedAdminUsername | quote }}
+  # ---- Database connection (non-secret parts) ----
+  POSTGRES_DB: {{ .Values.postgres.auth.database | quote }}
+  POSTGRES_USER: {{ .Values.postgres.auth.username | quote }}
+  POSTGRES_HOST: {{ include "ems.postgresService" . | quote }}
+  POSTGRES_PORT: {{ .Values.postgres.service.port | quote }}

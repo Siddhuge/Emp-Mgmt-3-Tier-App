@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "ems.fullname" . }}-test
+  labels:
+    {{- include "ems.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: api-check
+      image: curlimages/curl:8.11.0
+      command: ["sh", "-c"]
+      args:
+        - >-
+          curl -fsS http://{{ include "ems.componentName" (dict "ctx" . "component" "backend") }}:{{ .Values.backend.service.port }}/health &&
+          curl -fsS http://{{ include "ems.componentName" (dict "ctx" . "component" "frontend") }}:{{ .Values.frontend.service.port }}/healthz
