@@ -1,0 +1,20 @@
+# GitLeaks configuration.
+# Keep the FULL default ruleset; allowlist a couple of known non-secrets that the
+# generic rules flag by mistake (both verified):
+#   1. sonar-project.properties — Sonar org/project keys are PUBLIC identifiers
+#      (they appear in SonarCloud URLs). The real secret (SONAR_TOKEN) is a
+#      GitHub Actions secret, never committed.
+#   2. checksum/config & checksum/secret pod annotations — Helm SHA-256
+#      change-detection hashes (e3b0c442… is literally sha256("")), not creds.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Non-secret identifiers (Sonar keys) + Helm checksum/* hashes"
+regexTarget = "line"
+paths = [
+  '''(^|/)sonar-project\.properties$''',
+]
+regexes = [
+  '''checksum/(config|secret):\s*[a-f0-9]{64}''',
+]
