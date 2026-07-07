@@ -1,7 +1,10 @@
 # Terraform CI/CD for Azure (AKS dev/test).
-#   Pull request  -> plan dev + test, posted as PR comments (no approval needed)
-#   Push to main  -> apply dev, then test (each gated by GitHub Environment approval)
-#   Manual run    -> apply a chosen environment
+#   PR to main   -> plan dev + test (ungated), posted as PR comments
+#   push to main -> plan dev -> [approve] -> apply dev -> plan test -> [approve] -> apply test
+#   manual run   -> plan a chosen env, and (if mode=apply) [approve] -> apply it
+#
+# Approval always happens AFTER a reviewable plan job has completed (its plan is
+# in the job summary + uploaded as an artifact that apply consumes verbatim).
 name: terraform-ci
 
 on:
@@ -18,12 +21,16 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Environment to apply"
+        description: "Environment"
         type: choice
         options: [dev, test]
         default: dev
+      mode:
+        description: "plan (review only) or apply"
+        type: choice
+        options: [plan, apply]
+        default: plan
 
-# Least privilege for the whole pipeline; the reusable workflow narrows further.
 permissions:
   contents: read
   id-token: write
@@ -31,7 +38,7 @@ permissions:
   security-events: write
 
 jobs:
-  # ---- Pull request: plan every environment (matrix), comment results ----
+  # ---- Pull request: plan every environment (review-only) ----
   plan:
     if: github.event_name == 'pull_request'
     strategy:
@@ -41,32 +48,59 @@ jobs:
     uses: ./.github/workflows/terraform-reusable.yml
     with:
       environment: ${{ matrix.environment }}
-      apply: false
+      mode: plan
     secrets: inherit
 
-  # ---- Merge to main: promote dev -> test, each gated by environment approval ----
-  apply-dev:
+  # ---- Merge to main: plan -> approve -> apply, promoting dev then test ----
+  plan-dev:
     if: github.event_name == 'push'
     uses: ./.github/workflows/terraform-reusable.yml
     with:
       environment: dev
-      apply: true
+      mode: plan
     secrets: inherit
 
-  apply-test:
+  apply-dev:
+    if: github.event_name == 'push'
+    needs: plan-dev
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      environment: dev
+      mode: apply
+    secrets: inherit
+
+  plan-test:
     if: github.event_name == 'push'
     needs: apply-dev
     uses: ./.github/workflows/terraform-reusable.yml
     with:
       environment: test
-      apply: true
+      mode: plan
     secrets: inherit
 
-  # ---- Manual apply of a single environment ----
-  apply-manual:
+  apply-test:
+    if: github.event_name == 'push'
+    needs: plan-test
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      environment: test
+      mode: apply
+    secrets: inherit
+
+  # ---- Manual: plan the chosen env; apply only if mode=apply (after approval) ----
+  plan-manual:
     if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/terraform-reusable.yml
     with:
       environment: ${{ inputs.environment }}
-      apply: true
+      mode: plan
+    secrets: inherit
+
+  apply-manual:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'apply'
+    needs: plan-manual
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      environment: ${{ inputs.environment }}
+      mode: apply
     secrets: inherit

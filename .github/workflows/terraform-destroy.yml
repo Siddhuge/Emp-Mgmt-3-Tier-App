@@ -31,10 +31,21 @@ jobs:
             exit 1
           fi
 
-  destroy:
+  # Show the destroy plan first (ungated), then apply it after approval.
+  plan-destroy:
     needs: guard
     uses: ./.github/workflows/terraform-reusable.yml
     with:
       environment: ${{ inputs.environment }}
+      mode: plan
+      destroy: true
+    secrets: inherit
+
+  apply-destroy:
+    needs: plan-destroy
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      environment: ${{ inputs.environment }}
+      mode: apply
       destroy: true
     secrets: inherit

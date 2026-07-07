@@ -9,10 +9,23 @@ environment-gated applies.
 | File | Trigger | Does |
 | --- | --- | --- |
 | `terraform-ci.yml` | PR to `main` | `fmt` → `tflint` → Trivy IaC scan → `validate` → **plan** dev+test, posted as PR comments |
-| `terraform-ci.yml` | push to `main` | **apply** dev → then test (each behind an environment approval) |
-| `terraform-ci.yml` | manual dispatch | apply a chosen environment |
-| `terraform-destroy.yml` | manual dispatch | guarded **destroy** (type the env name to confirm + approval gate) |
-| `terraform-reusable.yml` | (called by the above) | the shared plan/apply engine |
+| `terraform-ci.yml` | push to `main` | **plan dev → approve → apply dev → plan test → approve → apply test** |
+| `terraform-ci.yml` | manual dispatch | plan the chosen env; apply only if `mode=apply` (after approval) |
+| `terraform-destroy.yml` | manual dispatch | guarded destroy: type env to confirm → **plan (destroy) → approve → apply** |
+| `terraform-reusable.yml` | (called by the above) | shared job with a `plan` / `apply` **mode** |
+
+## Plan-then-approve (why apply is a separate job)
+
+A GitHub Environment approval gate pauses a job **before its first step** — so a
+combined plan+apply job would ask for approval *before* the plan runs. Instead
+the flow is split:
+
+1. **plan** job (ungated, `<env>-plan` environment): init → fmt → tflint → Trivy
+   → validate → `plan -out=tfplan`. The plan is shown in the **job summary**
+   (and PR comment) and uploaded as an **artifact**.
+2. **apply** job (`needs` the plan job, protected `<env>` environment): the
+   approval happens here — *after* you've read the plan — then it
+   `terraform apply`s the **exact** uploaded plan (no re-plan, no drift).
 
 ## Security properties
 

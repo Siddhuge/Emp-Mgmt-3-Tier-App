@@ -1,5 +1,9 @@
-# Reusable Terraform workflow: fmt -> lint -> security scan -> validate -> plan -> (apply).
-# Called by terraform-ci.yml and terraform-destroy.yml. Auth is passwordless (OIDC).
+# Reusable Terraform job. Runs in one of two modes:
+#   plan  : init -> fmt -> tflint -> Trivy -> validate -> plan  (ungated; plan is
+#           uploaded as an artifact and shown in the job summary / PR comment)
+#   apply : downloads the reviewed plan artifact and applies exactly it (gated by
+#           the environment's approval rule)
+# Auth is passwordless (GitHub OIDC -> Entra federated identity).
 name: terraform-reusable
 
 on:
@@ -9,12 +13,12 @@ on:
         description: "Target environment (dev or test)."
         type: string
         required: true
-      apply:
-        description: "Apply the plan (true) or plan-only (false)."
-        type: boolean
-        default: false
+      mode:
+        description: "plan or apply."
+        type: string
+        required: true
       destroy:
-        description: "Produce/apply a destroy plan instead of a create plan."
+        description: "Plan/apply a destroy instead of a create."
         type: boolean
         default: false
       terraform_version:
@@ -25,21 +29,21 @@ on:
         default: "terraform"
 
 permissions:
-  contents: read          # checkout
-  id-token: write         # OIDC token for Azure login (no secrets)
-  pull-requests: write    # post the plan as a PR comment
-  security-events: write  # upload Trivy SARIF to code scanning
+  contents: read
+  id-token: write
+  pull-requests: write
+  security-events: write
 
 jobs:
   terraform:
-    name: "${{ inputs.environment }} · ${{ inputs.destroy && 'destroy' || (inputs.apply && 'apply' || 'plan') }}"
+    name: "${{ inputs.environment }} · ${{ inputs.mode }}${{ inputs.destroy && ' (destroy)' || '' }}"
     runs-on: ubuntu-latest
 
-    # Apply/destroy target the protected environment (required reviewers gate here);
-    # plan-only uses an unprotected "<env>-plan" environment so PRs don't need approval.
-    environment: ${{ (inputs.apply || inputs.destroy) && inputs.environment || format('{0}-plan', inputs.environment) }}
+    # Apply runs in the PROTECTED environment (approval happens here, AFTER the
+    # separate plan job has already produced a reviewable plan). Plan runs in the
+    # unprotected "<env>-plan" environment (no approval).
+    environment: ${{ inputs.mode == 'apply' && inputs.environment || format('{0}-plan', inputs.environment) }}
 
-    # Never let two runs touch the same env's state at once.
     concurrency:
       group: terraform-${{ inputs.environment }}
       cancel-in-progress: false
@@ -49,19 +53,15 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
 
     env:
-      # ---- Azure auth via GitHub OIDC (no client secret stored anywhere) ----
       ARM_USE_OIDC: "true"
-      ARM_USE_AZUREAD: "true"            # AAD auth to the state storage (no account keys)
+      ARM_USE_AZUREAD: "true"
       ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      # ---- Terraform CI ergonomics ----
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
 
     steps:
-      # NOTE: action tags shown for readability. For maximum supply-chain safety,
-      # pin each to a full commit SHA and let Dependabot bump them.
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -70,36 +70,6 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
-
-      - name: Terraform fmt (check)
-        run: terraform fmt -check -recursive
-
-      - name: Setup TFLint
-        uses: terraform-linters/setup-tflint@v4
-        with:
-          tflint_version: v0.53.0
-
-      - name: TFLint
-        run: |
-          tflint --init
-          tflint --recursive --format compact
-
-      - name: Trivy IaC security scan (SARIF)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: config
-          scan-ref: ${{ inputs.working_directory }}
-          format: sarif
-          output: trivy-iac.sarif
-          severity: HIGH,CRITICAL
-          exit-code: "0"   # report, don't hard-fail the pipeline on infra findings
-
-      - name: Upload Trivy SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: ${{ inputs.working_directory }}/trivy-iac.sarif
-          category: trivy-iac-${{ inputs.environment }}
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -116,11 +86,47 @@ jobs:
             -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
             -backend-config="key=${{ inputs.environment }}.tfstate"
 
+      # ============================ PLAN ============================
+      - name: Format check
+        if: inputs.mode == 'plan'
+        run: terraform fmt -check -recursive
+
+      - name: Setup TFLint
+        if: inputs.mode == 'plan'
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.53.0
+
+      - name: TFLint
+        if: inputs.mode == 'plan'
+        run: |
+          tflint --init
+          tflint --recursive --format compact
+
+      - name: Trivy IaC security scan (SARIF)
+        if: inputs.mode == 'plan'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: ${{ inputs.working_directory }}
+          format: sarif
+          output: trivy-iac.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+
+      - name: Upload Trivy SARIF
+        if: inputs.mode == 'plan'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ inputs.working_directory }}/trivy-iac.sarif
+          category: trivy-iac-${{ inputs.environment }}
+
       - name: Terraform validate
+        if: inputs.mode == 'plan'
         run: terraform validate -no-color
 
       - name: Terraform plan
-        id: plan
+        if: inputs.mode == 'plan'
         run: |
           terraform plan -no-color -lock-timeout=5m \
             -var-file="${{ inputs.environment }}.tfvars" \
@@ -128,8 +134,19 @@ jobs:
             -out=tfplan
           terraform show -no-color tfplan > plan.txt
 
+      - name: Publish plan to job summary
+        if: inputs.mode == 'plan'
+        run: |
+          {
+            echo "### Terraform plan — \`${{ inputs.environment }}\`${{ inputs.destroy && ' (DESTROY)' || '' }}";
+            echo '```hcl';
+            head -c 60000 plan.txt;
+            echo '';
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Comment plan on PR
-        if: github.event_name == 'pull_request'
+        if: inputs.mode == 'plan' && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
@@ -137,7 +154,7 @@ jobs:
             const dir = '${{ inputs.working_directory }}';
             let plan = fs.readFileSync(`${dir}/plan.txt`, 'utf8');
             const max = 63000;
-            if (plan.length > max) plan = plan.slice(0, max) + '\n... (truncated, see job log)';
+            if (plan.length > max) plan = plan.slice(0, max) + '\n... (truncated, see job summary)';
             const marker = `<!-- tf-plan:${{ inputs.environment }} -->`;
             const body = `${marker}\n### Terraform plan — \`${{ inputs.environment }}\`\n\n<details><summary>Show plan</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n\n</details>`;
             const { data: comments } = await github.rest.issues.listComments({
@@ -150,13 +167,24 @@ jobs:
             }
 
       - name: Upload plan artifact
+        if: inputs.mode == 'plan'
         uses: actions/upload-artifact@v4
         with:
           name: tfplan-${{ inputs.environment }}
-          path: ${{ inputs.working_directory }}/tfplan
+          path: |
+            ${{ inputs.working_directory }}/tfplan
+            ${{ inputs.working_directory }}/plan.txt
           retention-days: 5
 
-      # Apply exactly the plan that was reviewed (plan/apply consistency).
-      - name: Terraform apply
-        if: inputs.apply || inputs.destroy
-        run: terraform apply -no-color -lock-timeout=5m -auto-approve tfplan
+      # ============================ APPLY ============================
+      # Runs only after approval; applies the exact plan reviewed in the plan job.
+      - name: Download reviewed plan
+        if: inputs.mode == 'apply'
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: ${{ inputs.working_directory }}
+
+      - name: Terraform apply (reviewed plan)
+        if: inputs.mode == 'apply'
+        run: terraform apply -no-color -lock-timeout=5m tfplan
