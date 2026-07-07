@@ -157,7 +157,7 @@ next runs; **push + sign happen only on `main`** (PRs stop after the image scan)
 ```
 1 GitLeaks (secrets)  →  2 SonarQube (SAST)  →  3 OWASP Dependency-Check (SCA)
      →  4 test (pytest + frontend build)  →  5 build + Trivy image scan
-     →  6 push to ACR  →  7 cosign sign (keyless)
+     →  6 push to ACR **and** Docker Hub  →  7 cosign sign (keyless)
 ```
 
 Enterprise properties:
@@ -169,6 +169,17 @@ Enterprise properties:
   images are pushed, then signed by digest.
 - **Immutable tags** — `:<VERSION>` and `:git-<sha>`.
 
+### Dual-registry publish (resilient)
+
+The publish stage pushes each image to **both ACR and Docker Hub, independently**:
+
+- If **one** registry is unavailable/misconfigured → the job logs a **⚠ warning**
+  ("… unavailable") and **continues** with the other. Non-fatal.
+- The job **fails only if BOTH** registries fail (or, of course, if the Trivy gate
+  finds a CRITICAL). Scanning stages always fail hard.
+- A registry is simply skipped if its config is absent — ACR when
+  `ACR_LOGIN_SERVER` is unset, Docker Hub when `DOCKERHUB_USERNAME` is unset.
+
 ## Setup
 
 Federated credential for the `main` branch is already created (subject
@@ -178,9 +189,11 @@ Add these in **Settings → Secrets and variables → Actions**:
 
 | Kind | Name | Value / notes |
 | --- | --- | --- |
-| Variable | `ACR_LOGIN_SERVER` | e.g. `acrempdevyykge.azurecr.io` |
+| Variable | `ACR_LOGIN_SERVER` | e.g. `acrempdevyykge.azurecr.io` — *unset to skip ACR* |
 | Variable | `ACR_NAME` | e.g. `acrempdevyykge` |
 | Variable | `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` | (already set) |
+| Variable | `DOCKERHUB_USERNAME` | your Docker Hub username — *unset to skip Docker Hub* |
+| Secret | `DOCKERHUB_TOKEN` | Docker Hub access token (hub.docker.com → Account Settings → **Personal access tokens** → Read/**Write**) |
 | Secret | `SONAR_TOKEN` | SonarCloud token (host is hardcoded to `sonarcloud.io`) |
 | Secret | `NVD_API_KEY` | *(optional)* speeds up OWASP DC |
 | Secret | `GITLEAKS_LICENSE` | *(only for GitHub orgs)* |

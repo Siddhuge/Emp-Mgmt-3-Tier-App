@@ -128,7 +128,9 @@ jobs:
           npm ci
           npm run build
 
-  # --------------------------------------- 5-7. build → Trivy → push → sign
+  # ------------------- 5-7. build → Trivy → push (ACR + Docker Hub) → sign
+  # Push to both registries independently: if one is unavailable the job WARNS
+  # and continues; it only fails if BOTH fail (or the Trivy gate finds CRITICALs).
   image:
     name: "5-7 · ${{ matrix.component }}"
     needs: test
@@ -141,8 +143,8 @@ jobs:
           - { component: frontend, context: ./frontend }
           - { component: database-init, context: ./database }
     env:
-      ACR: ${{ vars.ACR_LOGIN_SERVER }}
-      IMAGE: ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.component }}
+      PUBLISH: ${{ github.ref == 'refs/heads/main' }}
+      LOCAL: employee-management/${{ matrix.component }}   # local-only tag for scanning
     steps:
       - uses: actions/checkout@v4
 
@@ -157,62 +159,107 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # 5a. Build locally (loaded into the runner's Docker) so we can scan
-      #     BEFORE anything is pushed.
-      - name: Build image
+      # 5a. Build once, locally, so we can scan BEFORE pushing anywhere.
+      - name: Build image (local)
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           load: true
           provenance: false
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
-            ${{ env.IMAGE }}:git-${{ steps.meta.outputs.sha }}
+          tags: ${{ env.LOCAL }}:${{ steps.meta.outputs.version }}
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
             VCS_REF=${{ steps.meta.outputs.sha }}
             BUILD_DATE=${{ steps.meta.outputs.date }}
 
-      # 5b. Trivy gate — fail the build on fixable CRITICAL vulns.
+      # 5b. Trivy gate — hard fail on fixable CRITICAL vulns.
       - name: Trivy image scan (gate)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
+          image-ref: ${{ env.LOCAL }}:${{ steps.meta.outputs.version }}
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
           trivyignores: .trivyignore
 
-      # ---- Everything below runs only on main (not on PRs) ----
-      - name: Azure login (OIDC)
-        if: github.ref == 'refs/heads/main'
+      - name: Install cosign
+        if: env.PUBLISH == 'true'
+        uses: sigstore/cosign-installer@v3
+
+      # ------------------------- Registry 1: Azure Container Registry -------------------------
+      - name: "ACR · login (OIDC)"
+        id: acr-login
+        if: env.PUBLISH == 'true' && vars.ACR_LOGIN_SERVER != ''
+        continue-on-error: true
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: ACR login
-        if: github.ref == 'refs/heads/main'
-        run: az acr login --name ${{ vars.ACR_NAME }}
-
-      # 6. Push the scanned image.
-      - name: Push image
-        if: github.ref == 'refs/heads/main'
+      - name: "ACR · push + sign"
+        id: acr
+        if: env.PUBLISH == 'true' && vars.ACR_LOGIN_SERVER != '' && steps.acr-login.outcome == 'success'
+        continue-on-error: true
+        env:
+          REPO: ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.component }}
         run: |
-          docker push ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
-          docker push ${{ env.IMAGE }}:git-${{ steps.meta.outputs.sha }}
+          set -euo pipefail
+          az acr login --name ${{ vars.ACR_NAME }}
+          for t in "${{ steps.meta.outputs.version }}" "git-${{ steps.meta.outputs.sha }}"; do
+            docker tag "$LOCAL:${{ steps.meta.outputs.version }}" "$REPO:$t"
+            docker push "$REPO:$t" | tee /tmp/acr-push.log
+          done
+          DIGEST=$(grep -oE 'sha256:[0-9a-f]+' /tmp/acr-push.log | head -1)
+          cosign sign --yes "$REPO@$DIGEST"
+          echo "ACR: pushed + signed $REPO@$DIGEST"
 
-      - name: Install cosign
-        if: github.ref == 'refs/heads/main'
-        uses: sigstore/cosign-installer@v3
-
-      # 7. Keyless sign by digest (Sigstore/Fulcio via GitHub OIDC — no keys).
-      - name: Sign image (keyless)
-        if: github.ref == 'refs/heads/main'
+      - name: "ACR · notify unavailable"
+        if: env.PUBLISH == 'true' && vars.ACR_LOGIN_SERVER != '' && steps.acr.outcome != 'success'
         run: |
-          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
-            ${{ env.IMAGE }}:${{ steps.meta.outputs.version }})
-          echo "Signing $DIGEST"
-          cosign sign --yes "$DIGEST"
+          echo "::warning title=ACR unavailable::${{ matrix.component }} could not be pushed/signed to ACR — continuing with Docker Hub."
+
+      # ------------------------------- Registry 2: Docker Hub --------------------------------
+      - name: "Docker Hub · login"
+        id: dh-login
+        if: env.PUBLISH == 'true' && vars.DOCKERHUB_USERNAME != ''
+        continue-on-error: true
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: "Docker Hub · push + sign"
+        id: dh
+        if: env.PUBLISH == 'true' && vars.DOCKERHUB_USERNAME != '' && steps.dh-login.outcome == 'success'
+        continue-on-error: true
+        env:
+          REPO: docker.io/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.component }}
+        run: |
+          set -euo pipefail
+          for t in "${{ steps.meta.outputs.version }}" "git-${{ steps.meta.outputs.sha }}"; do
+            docker tag "$LOCAL:${{ steps.meta.outputs.version }}" "$REPO:$t"
+            docker push "$REPO:$t" | tee /tmp/dh-push.log
+          done
+          DIGEST=$(grep -oE 'sha256:[0-9a-f]+' /tmp/dh-push.log | head -1)
+          cosign sign --yes "$REPO@$DIGEST"
+          echo "Docker Hub: pushed + signed $REPO@$DIGEST"
+
+      - name: "Docker Hub · notify unavailable"
+        if: env.PUBLISH == 'true' && vars.DOCKERHUB_USERNAME != '' && steps.dh.outcome != 'success'
+        run: |
+          echo "::warning title=Docker Hub unavailable::${{ matrix.component }} could not be pushed/signed to Docker Hub — continuing."
+
+      # -------- Gate: succeed if ≥1 registry published; fail only if NONE did --------
+      - name: "Publish gate"
+        if: env.PUBLISH == 'true'
+        run: |
+          acr='${{ steps.acr.outcome }}'
+          dh='${{ steps.dh.outcome }}'
+          echo "ACR outcome=$acr | Docker Hub outcome=$dh"
+          if [ "$acr" != "success" ] && [ "$dh" != "success" ]; then
+            echo "::error title=No registry available::${{ matrix.component }}: both ACR and Docker Hub failed/were unavailable."
+            exit 1
+          fi
+          echo "✓ ${{ matrix.component }} published to at least one registry."
