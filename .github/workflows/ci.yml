@@ -76,18 +76,45 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: OWASP Dependency-Check
-        uses: dependency-check/Dependency-Check_Action@main
+
+      # Cache the NVD database between runs (first run downloads it).
+      - name: Cache NVD data
+        uses: actions/cache@v4
         with:
-          project: employee-management
-          path: "."
-          format: "SARIF,HTML"
-          out: reports
-          # Fail on High/Critical (CVSS >= 7). NVD API key avoids rate limits.
-          args: >-
-            --failOnCVSS 7
-            --enableRetired
-            ${{ secrets.NVD_API_KEY && format('--nvdApiKey {0}', secrets.NVD_API_KEY) || '' }}
+          path: dc-data
+          key: dependency-check-nvd-${{ github.run_id }}
+          restore-keys: |
+            dependency-check-nvd-
+
+      # Official OWASP Dependency-Check image (multi-format, real NVD updates,
+      # proper multi-flag args). Fails the job on any CVSS >= 7 (High/Critical).
+      - name: OWASP Dependency-Check
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          mkdir -p reports dc-data
+          EXTRA=(--enableRetired)
+          if [ -n "$NVD_API_KEY" ]; then
+            EXTRA+=(--nvdApiKey "$NVD_API_KEY")
+          else
+            echo "::warning title=No NVD API key::Set NVD_API_KEY to avoid slow, rate-limited NVD downloads."
+          fi
+          set +e
+          docker run --rm \
+            -v "$PWD:/src" \
+            -v "$PWD/dc-data:/usr/share/dependency-check/data" \
+            owasp/dependency-check:latest \
+            --scan /src \
+            --project "employee-management" \
+            --exclude "**/node_modules/**" --exclude "**/dist/**" --exclude "**/.git/**" \
+            --format SARIF --format HTML \
+            --out /src/reports \
+            --failOnCVSS 7 \
+            "${EXTRA[@]}"
+          rc=$?
+          sudo chown -R "$(id -u):$(id -g)" reports dc-data 2>/dev/null || true
+          exit $rc
+
       - name: Upload SCA SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v4
