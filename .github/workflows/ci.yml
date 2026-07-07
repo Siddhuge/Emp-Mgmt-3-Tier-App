@@ -57,17 +57,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0            # better SCM blame / new-code detection
-      - name: SonarQube scan
+      - name: SonarCloud scan
         uses: SonarSource/sonarqube-scan-action@v4
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_HOST_URL: https://sonarcloud.io
       - name: Quality gate (block on failure)
         uses: SonarSource/sonarqube-quality-gate-action@v1
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_HOST_URL: https://sonarcloud.io
 
   # -------------------------------------------------------------------- 3. SCA
   sca:

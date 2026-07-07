@@ -181,13 +181,20 @@ Add these in **Settings → Secrets and variables → Actions**:
 | Variable | `ACR_LOGIN_SERVER` | e.g. `acrempdevyykge.azurecr.io` |
 | Variable | `ACR_NAME` | e.g. `acrempdevyykge` |
 | Variable | `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` | (already set) |
-| Secret | `SONAR_TOKEN` | SonarQube user/project token |
-| Secret | `SONAR_HOST_URL` | your SonarQube server URL |
+| Secret | `SONAR_TOKEN` | SonarCloud token (host is hardcoded to `sonarcloud.io`) |
 | Secret | `NVD_API_KEY` | *(optional)* speeds up OWASP DC |
 | Secret | `GITLEAKS_LICENSE` | *(only for GitHub orgs)* |
 
-Also create the project (`employee-management`) in SonarQube — config lives in
-`sonar-project.properties`.
+### SonarCloud (SonarQube Cloud) — free for public repos
+
+1. Go to **https://sonarcloud.io** → sign in with GitHub.
+2. **+ → Analyze new project** → import `Siddhuge/Emp-Mgmt-3-Tier-App`.
+3. **Administration → Analysis Method → turn OFF "Automatic Analysis"** and select
+   **CI** (otherwise CI scans conflict with automatic analysis).
+4. Copy the **Organization Key** and **Project Key** shown on the setup page into
+   `sonar-project.properties` (currently `siddhuge` / `Siddhuge_Emp-Mgmt-3-Tier-App`
+   — adjust if yours differ).
+5. **My Account → Security → Generate token** → add it as the `SONAR_TOKEN` secret.
 
 ## Verify a signed image (keyless)
 
