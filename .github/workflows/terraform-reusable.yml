@@ -105,7 +105,9 @@ jobs:
 
       - name: Trivy IaC security scan (SARIF)
         if: inputs.mode == 'plan'
-        uses: aquasecurity/trivy-action@v0.30.0
+        # v0.36.0+ pins its nested setup-trivy to a commit SHA (older tags
+        # referenced now-deleted setup-trivy tags and fail to resolve).
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: ${{ inputs.working_directory }}
