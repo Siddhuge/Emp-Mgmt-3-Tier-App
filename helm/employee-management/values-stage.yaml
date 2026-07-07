@@ -7,10 +7,9 @@ config:
   accessTokenExpireMinutes: "240"
   corsOrigins: "https://employee.stage.sidhuge.xyz"
 
-# Prefer an externally-managed Secret in staging/prod.
-secrets:
-  create: true
-  # existingSecret: employee-management-secret
+# Secrets pulled from Key Vault via the CSI driver (inject KV coords at deploy).
+keyVault:
+  enabled: true
 
 podAntiAffinity: soft
 

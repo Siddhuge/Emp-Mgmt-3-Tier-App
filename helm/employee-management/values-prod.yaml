@@ -7,10 +7,9 @@ config:
   accessTokenExpireMinutes: "60"
   corsOrigins: "https://employee.sidhuge.xyz"
 
-# In production, inject secrets via an external secret store / sealed-secrets.
-secrets:
-  create: false
-  existingSecret: employee-management-secret
+# Secrets pulled from Key Vault via the CSI driver (inject KV coords at deploy).
+keyVault:
+  enabled: true
 
 # Require replicas to spread across nodes.
 podAntiAffinity: hard

@@ -1,0 +1,23 @@
+# Base — the common resources (generated from the Helm chart, same as
+# ../../manifests). Overlays in ../overlays/<env> set namespace + patch per env.
+# Regenerate with: make k8s-manifests  (see k8s/README.md)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - serviceaccount.yaml
+  - role.yaml
+  - rolebinding.yaml
+  - configmap.yaml
+  - frontend-configmap.yaml
+  - secretproviderclass.yaml
+  - postgres-service.yaml
+  - postgres-statefulset.yaml
+  - backend-service.yaml
+  - backend-deployment.yaml
+  - frontend-service.yaml
+  - frontend-deployment.yaml
+  - ingress.yaml
+  - hpa.yaml
+  - pdb.yaml
+  - networkpolicy.yaml

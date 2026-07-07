@@ -1,0 +1,24 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: employee-management-postgres
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+    app.kubernetes.io/component: postgres
+spec:
+  # Headless service => stable DNS identity for the StatefulSet pod.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP

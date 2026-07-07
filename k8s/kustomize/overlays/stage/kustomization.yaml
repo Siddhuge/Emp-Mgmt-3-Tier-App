@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: employee-stage
+resources:
+  - namespace.yaml
+  - ../../base
+labels:
+  - includeSelectors: false
+    pairs:
+      environment: stage
+patches:
+  - target: { kind: Ingress, name: employee-management }
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: employee.stage.sidhuge.xyz
+      - op: add
+        path: /spec/tls
+        value:
+          - hosts: ["employee.stage.sidhuge.xyz"]
+            secretName: employee-stage-tls
+      - op: add
+        path: /metadata/annotations/cert-manager.io~1cluster-issuer
+        value: letsencrypt-staging
+      - op: replace
+        path: /metadata/annotations/nginx.ingress.kubernetes.io~1ssl-redirect
+        value: "true"
+  - target: { kind: HorizontalPodAutoscaler, name: employee-management-backend }
+    patch: |
+      - { op: replace, path: /spec/minReplicas, value: 3 }
+      - { op: replace, path: /spec/maxReplicas, value: 8 }
+  - target: { kind: HorizontalPodAutoscaler, name: employee-management-frontend }
+    patch: |
+      - { op: replace, path: /spec/minReplicas, value: 3 }
+      - { op: replace, path: /spec/maxReplicas, value: 8 }
+  - path: patch-configmap.yaml

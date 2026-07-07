@@ -1,0 +1,27 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: employee-management-config
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+data:
+  # ---- Application (non-secret) configuration ----
+  ENVIRONMENT: "default"
+  LOG_LEVEL: "info"
+  API_URL: ""
+  FEATURE_FLAGS: "dashboard=true,departments=true"
+  # ---- Backend settings (consumed via envFrom) ----
+  JWT_ALGORITHM: "HS256"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+  CORS_ORIGINS: "https://employee.sidhuge.xyz"
+  SEED_ADMIN_USERNAME: "admin"
+  # ---- Database connection (non-secret parts) ----
+  POSTGRES_DB: "employee_db"
+  POSTGRES_USER: "postgres"
+  POSTGRES_HOST: "employee-management-postgres"
+  POSTGRES_PORT: "5432"

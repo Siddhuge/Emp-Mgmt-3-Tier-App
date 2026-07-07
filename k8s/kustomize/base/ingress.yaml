@@ -1,0 +1,34 @@
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: employee-management
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: "employee.sidhuge.xyz"
+      http:
+        paths:
+          # Path-based routing: /api -> backend, everything else -> frontend SPA.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: employee-management-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: employee-management-frontend
+                port:
+                  number: 80

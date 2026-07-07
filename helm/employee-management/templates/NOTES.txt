@@ -24,11 +24,15 @@ Components:
      kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "ems.componentName" (dict "ctx" . "component" "frontend") }} 8080:{{ .Values.frontend.service.port }}
 {{- end }}
 
-3. Default admin login: {{ .Values.config.seedAdminUsername }} / (value of secrets.seedAdminPassword)
+3. Admin username: {{ .Values.config.seedAdminUsername }} (password lives in {{ if .Values.keyVault.enabled }}Key Vault secret "{{ .Values.keyVault.secrets.seedAdminPassword }}"{{ else }}the release Secret{{ end }}).
 
-{{- if not .Values.secrets.create }}
+{{- if .Values.keyVault.enabled }}
 
-⚠  secrets.create=false — this release expects an existing Secret named
-   "{{ .Values.secrets.existingSecret }}" with keys: POSTGRES_PASSWORD, DATABASE_URL,
-   JWT_SECRET, SEED_ADMIN_PASSWORD.
+🔐 Secrets are pulled from Azure Key Vault "{{ .Values.keyVault.name }}" via the
+   Secrets Store CSI driver and synced into Secret "{{ include "ems.kvSecretName" . }}".
+   Nothing sensitive is stored in Git or in this chart.
+{{- else if .Values.secrets.existingSecret }}
+
+⚠  Using existing Secret "{{ .Values.secrets.existingSecret }}" — it must contain
+   keys: POSTGRES_PASSWORD, JWT_SECRET, SEED_ADMIN_PASSWORD.
 {{- end }}

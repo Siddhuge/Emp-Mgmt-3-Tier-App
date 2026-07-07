@@ -1,0 +1,164 @@
+---
+# Default-deny for every pod in the namespace; explicit allows follow below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: employee-management-default-deny
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# Allow DNS resolution (egress to kube-dns) for all pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: employee-management-allow-dns
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Internet/Ingress -> Frontend (8080)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: employee-management-frontend
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: employee-management
+      app.kubernetes.io/instance: employee-management
+      app.kubernetes.io/component: frontend
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    # Frontend proxies /api to the backend.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: employee-management
+              app.kubernetes.io/instance: employee-management
+              app.kubernetes.io/component: backend
+      ports:
+        - { protocol: TCP, port: 8000 }
+---
+# Frontend + Ingress -> Backend (8000)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: employee-management-backend
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: employee-management
+      app.kubernetes.io/instance: employee-management
+      app.kubernetes.io/component: backend
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: employee-management
+              app.kubernetes.io/instance: employee-management
+              app.kubernetes.io/component: frontend
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - { protocol: TCP, port: 8000 }
+  egress:
+    # Backend talks only to PostgreSQL.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: employee-management
+              app.kubernetes.io/instance: employee-management
+              app.kubernetes.io/component: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# Backend -> PostgreSQL (5432)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: employee-management-postgres
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: employee-management
+      app.kubernetes.io/instance: employee-management
+      app.kubernetes.io/component: postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: employee-management
+              app.kubernetes.io/instance: employee-management
+              app.kubernetes.io/component: backend
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# Allow the ingress controller to reach cert-manager HTTP-01 ACME solver pods.
+# Without this, default-deny blocks the ACME challenge and TLS issuance stalls.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: employee-management-acme-solver
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+spec:
+  podSelector:
+    matchLabels:
+      acme.cert-manager.io/http01-solver: "true"
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx

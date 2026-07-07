@@ -52,9 +52,15 @@ NAMESPACE ?= employee-$(ENV)
 .PHONY: k8s-cluster k8s-deploy k8s-validate k8s-status k8s-test k8s-down
 k8s-cluster: ## Create the kind cluster + ingress + metrics-server, load images
 	./scripts/k8s-cluster.sh
-k8s-deploy: ## Install/upgrade the chart (ENV=dev|stage|prod)
+k8s-deploy: ## Install/upgrade the chart on local kind (non-KV; secrets generated, not committed)
 	helm upgrade --install ems $(CHART) -n $(NAMESPACE) --create-namespace \
-	  -f $(CHART)/values-$(ENV).yaml --wait --timeout 240s
+	  -f $(CHART)/values-$(ENV).yaml \
+	  --set keyVault.enabled=false \
+	  --set secrets.jwtSecret=$(shell openssl rand -hex 24) \
+	  --set secrets.postgresPassword=$(shell openssl rand -hex 16) \
+	  --set secrets.seedAdminPassword=admin123 \
+	  --wait --timeout 240s
+	@echo "Local kind login: admin / admin123 (kind has no Key Vault; AKS pulls real secrets from KV)"
 k8s-validate: ## Run the Phase 3 validation checklist
 	NAMESPACE=$(NAMESPACE) ./scripts/k8s-validate.sh
 k8s-test: ## Run the chart's helm test hook
@@ -63,6 +69,17 @@ k8s-status: ## Show all workloads in the namespace
 	kubectl -n $(NAMESPACE) get deploy,statefulset,svc,ingress,hpa,pdb,netpol,pods
 k8s-down: ## Delete the kind cluster
 	kind delete cluster --name ems
+
+## ---- Plain manifests + Kustomize (generated from the Helm chart) ----
+.PHONY: k8s-manifests kustomize-dev kustomize-stage kustomize-prod
+k8s-manifests: ## Regenerate k8s/manifests + kustomize base from the chart
+	./scripts/gen-manifests.sh
+kustomize-dev: ## Render the dev overlay (pipe to envsubst | kubectl apply -f -)
+	kubectl kustomize k8s/kustomize/overlays/dev
+kustomize-stage: ## Render the stage overlay
+	kubectl kustomize k8s/kustomize/overlays/stage
+kustomize-prod: ## Render the prod overlay
+	kubectl kustomize k8s/kustomize/overlays/prod
 
 ## ---- Phase 3.5: AKS via Terraform (Option B — per-env remote state) ----
 TF_DIR ?= terraform

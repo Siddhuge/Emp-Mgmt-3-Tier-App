@@ -119,25 +119,45 @@ terraform apply -var-file=test.tfvars
 # Terraform prints the exact command:
 terraform output -raw aks_get_credentials_command | bash
 
-# (optional) push images to the new ACR
+# push images to the new ACR
 ACR=$(terraform output -raw acr_login_server)
 az acr login --name "${ACR%%.*}"
-# docker tag / push employee-management/* -> $ACR/*, then set image.registry=$ACR
+# docker tag / push employee-management/* -> $ACR/*
 
+# deploy — secrets come straight from Key Vault (no hardcoded secrets):
 helm upgrade --install ems ../helm/employee-management \
-  -n employee-dev --create-namespace -f ../helm/employee-management/values-dev.yaml
+  -n employee-dev --create-namespace -f ../helm/employee-management/values-dev.yaml \
+  --set image.registry=$ACR \
+  $(terraform output -raw helm_keyvault_set_flags)
 ```
 
 Because AKS uses **Azure CNI Overlay + Calico**, the Phase 3 NetworkPolicies are
 actually **enforced** here (unlike local kind/kindnet).
 
-## Consuming Key Vault secrets from pods
+## Consuming Key Vault secrets from pods — Workload Identity (wired into the chart)
 
-The cluster has the Secrets Store CSI driver + Workload Identity enabled. Create
-a `SecretProviderClass` referencing the vault (`terraform output key_vault_name`)
-and a federated identity credential against `aks_oidc_issuer_url` to mount
-`jwt-secret` / `postgres-password` / `seed-admin-password` into the backend — no
-secrets in Git or images.
+Secrets are **never** hardcoded. The chart ships a `SecretProviderClass` that the
+Secrets Store CSI driver uses to pull `jwt-secret` / `postgres-password` /
+`seed-admin-password` from Key Vault and sync them into a Kubernetes Secret the
+pods read as env vars (`DATABASE_URL` is assembled in-pod from the parts).
+
+Auth uses **Workload Identity** (least privilege — no node-wide identity):
+- Terraform creates a dedicated **user-assigned identity** (`id-emp-<env>-kv`),
+  grants it **Key Vault Secrets User**, and federates it to the app's Kubernetes
+  ServiceAccount via a `azurerm_federated_identity_credential`
+  (`subject = system:serviceaccount:employee-<env>:ems-employee-management`).
+- The chart annotates that ServiceAccount with the UAMI client ID and labels the
+  backend/postgres pods `azure.workload.identity/use: "true"`; the CSI driver
+  exchanges the pod's federated SA token for a Key Vault token.
+
+`terraform output helm_keyvault_set_flags` prints the exact `--set keyVault.*`
+flags (vault name, tenant, UAMI client ID) — pass them to `helm upgrade`.
+
+> The federation is bound to a specific namespace + ServiceAccount. If you change
+> the Helm **release name** or **namespace**, set `app_namespace` /
+> `app_service_account` in the tfvars to match (the SA name is
+> `<release>-employee-management`). Rotate a secret by updating Key Vault — the
+> CSI driver refreshes it (2-minute poll).
 
 ## State backend hardening (already applied)
 

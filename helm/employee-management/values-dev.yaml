@@ -7,10 +7,11 @@ config:
   accessTokenExpireMinutes: "480"
   corsOrigins: "http://employee.dev.sidhuge.xyz,http://localhost:8080"
 
-secrets:
-  jwtSecret: "dev-jwt-secret-not-for-production"
-  postgresPassword: "dev-postgres-password"
-  seedAdminPassword: "admin123"
+# Secrets come from Azure Key Vault via the CSI driver + Workload Identity —
+# nothing hardcoded here. name / tenantId / clientId are injected at deploy time
+# (see `terraform output helm_keyvault_set_flags`).
+keyVault:
+  enabled: true
 
 podAntiAffinity: soft
 

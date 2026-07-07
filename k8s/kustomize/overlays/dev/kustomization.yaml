@@ -1,0 +1,51 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: employee-dev
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+# Tag every object with the environment (but not selectors).
+labels:
+  - includeSelectors: false
+    pairs:
+      environment: dev
+
+patches:
+  # Ingress: dev host + TLS + HTTPS redirect.
+  - target:
+      kind: Ingress
+      name: employee-management
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: employee.dev.sidhuge.xyz
+      - op: add
+        path: /spec/tls
+        value:
+          - hosts: ["employee.dev.sidhuge.xyz"]
+            secretName: employee-dev-tls
+      - op: add
+        path: /metadata/annotations/cert-manager.io~1cluster-issuer
+        value: letsencrypt-prod
+      - op: replace
+        path: /metadata/annotations/nginx.ingress.kubernetes.io~1ssl-redirect
+        value: "true"
+  # HPA bounds (smaller for dev).
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: employee-management-backend
+    patch: |
+      - { op: replace, path: /spec/minReplicas, value: 2 }
+      - { op: replace, path: /spec/maxReplicas, value: 5 }
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: employee-management-frontend
+    patch: |
+      - { op: replace, path: /spec/minReplicas, value: 2 }
+      - { op: replace, path: /spec/maxReplicas, value: 5 }
+  # ConfigMap + resource sizing.
+  - path: patch-configmap.yaml
+  - path: patch-resources.yaml

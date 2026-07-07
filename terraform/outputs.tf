@@ -33,6 +33,26 @@ output "key_vault_uri" {
   value       = module.keyvault.uri
 }
 
+output "tenant_id" {
+  description = "Entra tenant ID."
+  value       = data.azurerm_client_config.current.tenant_id
+}
+
+output "kv_identity_client_id" {
+  description = "Client ID of the workload-identity UAMI (for the chart's SecretProviderClass / ServiceAccount)."
+  value       = azurerm_user_assigned_identity.kv.client_id
+}
+
+output "helm_keyvault_set_flags" {
+  description = "Copy-paste Helm flags to pull secrets from Key Vault via workload identity."
+  value = join(" ", [
+    "--set keyVault.enabled=true",
+    "--set keyVault.name=${module.keyvault.name}",
+    "--set keyVault.tenantId=${data.azurerm_client_config.current.tenant_id}",
+    "--set keyVault.clientId=${azurerm_user_assigned_identity.kv.client_id}",
+  ])
+}
+
 output "acr_login_server" {
   description = "ACR login server (null when ACR is disabled)."
   value       = var.enable_acr ? azurerm_container_registry.this[0].login_server : null

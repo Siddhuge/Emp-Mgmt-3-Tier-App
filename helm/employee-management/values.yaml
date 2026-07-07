@@ -28,14 +28,32 @@ config:
   seedAdminUsername: admin
   featureFlags: "dashboard=true,departments=true"
 
-# ---- Secrets (rendered into a Secret unless existingSecret is set) ----
-# NEVER commit real values. Override at deploy time or use existingSecret.
+# ---- Secrets ----
+# Preferred: pull from Azure Key Vault (see keyVault below). The values here are
+# used ONLY when keyVault.enabled=false and existingSecret is empty (e.g. local
+# kind) — leave them empty and inject via --set/CI. No real secrets in Git.
 secrets:
   create: true
   existingSecret: ""
-  jwtSecret: "change-me-in-a-real-deployment"
-  postgresPassword: "change-me-in-a-real-deployment"
-  seedAdminPassword: "change-me-in-a-real-deployment"
+  jwtSecret: ""
+  postgresPassword: ""
+  seedAdminPassword: ""
+
+# ---- Azure Key Vault via the Secrets Store CSI driver (recommended) ----
+# When enabled, secrets are fetched from Key Vault at runtime and synced into a
+# Kubernetes Secret — nothing sensitive lives in Git or in this chart. The three
+# non-empty fields come straight from `terraform output`.
+keyVault:
+  enabled: false
+  name: ""        # terraform output key_vault_name
+  tenantId: ""    # terraform output tenant_id
+  # Workload-identity UAMI client ID; federated to the app ServiceAccount.
+  clientId: ""    # terraform output kv_identity_client_id
+  # Names of the secrets as stored in Key Vault (created by Terraform).
+  secrets:
+    jwtSecret: jwt-secret
+    postgresPassword: postgres-password
+    seedAdminPassword: seed-admin-password
 
 # ---- Service account + RBAC ----
 serviceAccount:

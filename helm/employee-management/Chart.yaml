@@ -3,7 +3,7 @@ name: employee-management
 description: Production-grade Helm chart for the Employee Management System (React + FastAPI + PostgreSQL)
 type: application
 # Chart version — bumped for chart/template changes (app appVersion unchanged).
-version: 1.1.0
+version: 1.2.0
 appVersion: "1.0.0"
 keywords:
   - employee-management
@@ -17,6 +17,8 @@ sources:
   - https://example.com/employee-management
 annotations:
   artifacthub.io/changes: |
+    - kind: added
+      description: Azure Key Vault secrets via the Secrets Store CSI driver with Workload Identity (no hardcoded secrets, no node-wide identity); DATABASE_URL assembled in-pod
     - kind: added
       description: TLS via cert-manager (Let's Encrypt) with per-environment issuers
     - kind: added

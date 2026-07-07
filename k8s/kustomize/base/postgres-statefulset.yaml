@@ -1,30 +1,36 @@
-{{- if .Values.postgres.enabled -}}
-{{- $component := "postgres" -}}
-{{- $name := include "ems.componentName" (dict "ctx" . "component" $component) -}}
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ $name }}
+  name: employee-management-postgres
   labels:
-    {{- include "ems.labels" . | nindent 4 }}
-    app.kubernetes.io/component: {{ $component }}
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+    app.kubernetes.io/component: postgres
 spec:
   # StatefulSet => stable identity + ordered lifecycle for the database.
-  serviceName: {{ $name }}
+  serviceName: employee-management-postgres
   replicas: 1
   selector:
     matchLabels:
-      {{- include "ems.selectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
+      app.kubernetes.io/name: employee-management
+      app.kubernetes.io/instance: employee-management
+      app.kubernetes.io/component: postgres
   template:
     metadata:
       labels:
-        {{- include "ems.labels" . | nindent 8 }}
-        app.kubernetes.io/component: {{ $component }}
-        {{- if .Values.keyVault.enabled }}
+        app.kubernetes.io/name: employee-management
+        app.kubernetes.io/instance: employee-management
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/part-of: employee-management
+        environment: "default"
+        app.kubernetes.io/component: postgres
         azure.workload.identity/use: "true"
-        {{- end }}
     spec:
-      serviceAccountName: {{ include "ems.serviceAccountName" . }}
+      serviceAccountName: employee-management
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 60
       securityContext:
@@ -34,26 +40,26 @@ spec:
           type: RuntimeDefault
       containers:
         - name: postgres
-          image: {{ include "ems.image" (dict "root" . "cfg" .Values.postgres) }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: ${REGISTRY}/database-init:1.0.0
+          imagePullPolicy: IfNotPresent
           ports:
             - name: postgres
-              containerPort: {{ .Values.postgres.service.port }}
+              containerPort: 5432
           env:
             - name: POSTGRES_USER
               valueFrom:
                 configMapKeyRef:
-                  name: {{ include "ems.configMapName" . }}
+                  name: employee-management-config
                   key: POSTGRES_USER
             - name: POSTGRES_DB
               valueFrom:
                 configMapKeyRef:
-                  name: {{ include "ems.configMapName" . }}
+                  name: employee-management-config
                   key: POSTGRES_DB
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "ems.secretName" . }}
+                  name: employee-management-kv
                   key: POSTGRES_PASSWORD
             # Keep data in a subdirectory so the volume root (lost+found) is fine.
             - name: PGDATA
@@ -74,7 +80,12 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 15
           resources:
-            {{- toYaml .Values.postgres.resources | nindent 12 }}
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 250m
+              memory: 256Mi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -84,42 +95,29 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
-            {{- if .Values.keyVault.enabled }}
             # Mount the CSI volume so the Key Vault -> Secret sync happens.
             - name: kv-secrets
               mountPath: /mnt/secrets-store
               readOnly: true
-            {{- end }}
-      {{- if or .Values.postgres.persistence.standalone .Values.keyVault.enabled }}
       volumes:
-        {{- if .Values.postgres.persistence.standalone }}
-        - name: data
-          persistentVolumeClaim:
-            claimName: {{ include "ems.componentName" (dict "ctx" . "component" "postgres") }}-data
-        {{- end }}
-        {{- if .Values.keyVault.enabled }}
         - name: kv-secrets
           csi:
             driver: secrets-store.csi.x-k8s.io
             readOnly: true
             volumeAttributes:
-              secretProviderClass: {{ include "ems.secretProviderClassName" . }}
-        {{- end }}
-      {{- end }}
-  {{- if and .Values.postgres.persistence.enabled (not .Values.postgres.persistence.standalone) }}
+              secretProviderClass: employee-management-kv
   volumeClaimTemplates:
     - metadata:
         name: data
         labels:
-          {{- include "ems.labels" . | nindent 10 }}
+          app.kubernetes.io/name: employee-management
+          app.kubernetes.io/instance: employee-management
+          app.kubernetes.io/version: "1.0.0"
+          app.kubernetes.io/part-of: employee-management
+          environment: "default"
       spec:
         accessModes:
-          {{- toYaml .Values.postgres.persistence.accessModes | nindent 10 }}
-        {{- if .Values.postgres.persistence.storageClass }}
-        storageClassName: {{ .Values.postgres.persistence.storageClass }}
-        {{- end }}
+          - ReadWriteOnce
         resources:
           requests:
-            storage: {{ .Values.postgres.persistence.size }}
-  {{- end }}
-{{- end -}}
+            storage: 2Gi

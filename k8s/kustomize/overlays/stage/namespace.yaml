@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: employee-stage
+  labels:
+    app.kubernetes.io/part-of: employee-management
+    kubernetes.io/metadata.name: employee-stage

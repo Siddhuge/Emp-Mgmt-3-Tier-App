@@ -1,8 +1,20 @@
-# Employee Management System — Phase 1
+# Employee Management System — 3-Tier App
 
-A full-stack employee management application, built the way a real team would:
-a React SPA talking to a FastAPI backend over REST, with SQLAlchemy over
-PostgreSQL — all wired together locally with Docker Compose.
+A full-stack employee management app taken from local Docker to a hardened,
+HTTPS, secret-free deployment on **Azure Kubernetes Service** — built the way a
+real team would, in phases:
+
+| Phase | What |
+| --- | --- |
+| **1** | React SPA + FastAPI + PostgreSQL, layered architecture, JWT/RBAC, Docker Compose |
+| **2** | Hardened multi-stage OCI images, Trivy scan, SBOM, cosign signing |
+| **3** | Production Helm chart (HPA, PDB, NetworkPolicies, Ingress, probes) |
+| **3.5** | Terraform for AKS dev/test (VNet, AKS, Key Vault, ACR) + GitHub Actions CI/CD |
+| **secrets** | Azure Key Vault via Secrets Store CSI + **Workload Identity** — no hardcoded secrets |
+| **deploy** | Same app as **Helm**, **plain manifests**, and **Kustomize** |
+
+The core app is a React SPA talking to a FastAPI backend over REST, with
+SQLAlchemy over PostgreSQL.
 
 ```
         React Frontend  (TypeScript, MUI, React Query)
@@ -23,8 +35,13 @@ employee-management/
 ├── frontend/            # React 19 + TypeScript + Vite + MUI
 ├── backend/             # FastAPI (layered: routes → services → repository → models)
 ├── database/            # PostgreSQL init script
-├── docker-compose.yml   # db + backend + frontend
-├── .env                 # shared configuration
+├── helm/                # production Helm chart (source of truth for k8s)
+├── k8s/                 # plain manifests + Kustomize (generated from the chart)
+├── terraform/           # AKS dev/test infra (modules + per-env remote state)
+├── manifests/           # cluster-scoped extras (cert-manager issuers, CoreDNS)
+├── .github/workflows/   # GitHub Actions CI/CD (OIDC → Azure)
+├── scripts/             # build/scan/sbom/sign, k8s, terraform bootstrap, gen-manifests
+├── docker-compose.yml   docker-compose.prod.yml
 └── README.md
 ```
 
@@ -396,8 +413,72 @@ Additionally demonstrated live:
 > a policy-capable CNI (Calico/Cilium) or a managed cluster (AKS/EKS/GKE) that
 > supports it. The objects are validated as correct and present.
 
-## Later phases
+---
 
-The `argocd/`, `manifests/`, `terraform/`, `monitoring/`, and `github-actions/`
-directories are placeholders for Phase 4+ (GitOps/CD, IaC, observability). The
-Helm chart from Phase 3 is what those phases promote across environments.
+# Phase 3.5 — AKS on Azure (Terraform + CI/CD)
+
+Cost-efficient, enterprise-shaped AKS **dev** and **test** environments, all as
+code. Full detail in [terraform/README.md](terraform/README.md).
+
+- **Modules:** VNet + NSG, AKS (Azure CNI Overlay + Calico, OIDC + Workload
+  Identity, KV CSI add-on), RBAC Key Vault (+ generated secrets), Basic ACR.
+- **Cost knobs only** differ dev↔test (VM size, autoscaler, monitoring).
+- **Remote state per environment** (Option B): one state object per env in Azure
+  Storage; `make tf-bootstrap` then `make tf-plan TF_ENV=dev`.
+
+```bash
+make tf-bootstrap                     # one-time: state backend
+make tf-plan  TF_ENV=dev              # fmt → tflint → plan
+make tf-apply TF_ENV=dev              # create AKS/KV/ACR/…
+terraform output -raw aks_get_credentials_command | bash
+```
+
+## CI/CD — GitHub Actions (passwordless)
+
+`.github/workflows/` — Terraform pipeline using **OIDC** (no stored secrets):
+
+- **PR →** `fmt` → `tflint` → Trivy IaC scan → `validate` → **plan** (dev+test),
+  posted as PR comments.
+- **merge to main →** **apply** dev → then test, each behind a GitHub Environment
+  approval gate. Manual dispatch + guarded destroy included.
+
+Setup (one-time OIDC federation, roles, variables) is in
+[.github/workflows/README.md](.github/workflows/README.md).
+
+## Secrets — Key Vault + Workload Identity (no hardcoded secrets)
+
+Nothing sensitive lives in Git, images, or values files. On AKS:
+
+```
+Key Vault (jwt-secret, postgres-password, seed-admin-password)
+   │  Workload Identity: UAMI federated to the app ServiceAccount (Terraform)
+   ▼
+Secrets Store CSI driver → synced K8s Secret → pods (DATABASE_URL assembled in-pod)
+```
+
+The Helm chart ships a `SecretProviderClass` and wires the ServiceAccount
+annotation + pod labels; `terraform output helm_keyvault_set_flags` prints the
+`--set keyVault.*` values. Local kind uses generated (uncommitted) secrets.
+
+## Deployment options — Helm · plain manifests · Kustomize
+
+The same app deploys three ways (Helm is the source of truth; the others are
+generated from it via `make k8s-manifests`). See [k8s/README.md](k8s/README.md).
+
+```bash
+# Helm
+helm upgrade --install ems helm/employee-management -n employee-dev --create-namespace \
+  -f helm/employee-management/values-dev.yaml \
+  --set image.registry=$ACR $(terraform output -raw helm_keyvault_set_flags)
+
+# Kustomize (per-env overlays: dev / stage / prod)
+kubectl kustomize k8s/kustomize/overlays/dev \
+  | envsubst '${REGISTRY} ${KV_NAME} ${KV_TENANT_ID} ${KV_CLIENT_ID}' | kubectl apply -f -
+```
+
+## Live proof
+
+Deployed to a real AKS dev cluster and served at **https://employee.dev.sidhuge.xyz**
+with a trusted Let's Encrypt certificate (cert-manager), images pulled from ACR,
+secrets from Key Vault, HPA/PDB/NetworkPolicies enforced (Calico) — then torn
+down with `terraform destroy`. The full walkthrough lives across the phase docs.

@@ -28,6 +28,11 @@ output "secret_provider_object_id" {
   value       = azurerm_kubernetes_cluster.this.key_vault_secrets_provider[0].secret_identity[0].object_id
 }
 
+output "secret_provider_client_id" {
+  description = "Client ID of the Key Vault Secrets Provider (CSI) identity — used by the SecretProviderClass."
+  value       = azurerm_kubernetes_cluster.this.key_vault_secrets_provider[0].secret_identity[0].client_id
+}
+
 output "kube_config_raw" {
   description = "Raw kubeconfig for the cluster."
   value       = azurerm_kubernetes_cluster.this.kube_config_raw

@@ -1,0 +1,143 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: employee-management-backend
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+    app.kubernetes.io/component: backend
+spec:
+  # Zero-downtime rolling updates: bring a new pod up before removing an old one.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: employee-management
+      app.kubernetes.io/instance: employee-management
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      annotations:
+        # Roll pods when config/secret content changes.
+        checksum/config: 4599d730a61095130ac1c85493d3e4b0c8bf178ea87666c465e94f6a20019b63
+        checksum/secret: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+      labels:
+        app.kubernetes.io/name: employee-management
+        app.kubernetes.io/instance: employee-management
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/part-of: employee-management
+        environment: "default"
+        app.kubernetes.io/component: backend
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: employee-management
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: employee-management
+                    app.kubernetes.io/instance: employee-management
+                    app.kubernetes.io/component: backend
+      containers:
+        - name: backend
+          image: ${REGISTRY}/backend:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          # Non-secret config from the ConfigMap.
+          envFrom:
+            - configMapRef:
+                name: employee-management-config
+          env:
+            # DB connection parts (non-secret) — referenced by DATABASE_URL below.
+            - name: POSTGRES_USER
+              valueFrom: { configMapKeyRef: { name: employee-management-config, key: POSTGRES_USER } }
+            - name: POSTGRES_HOST
+              valueFrom: { configMapKeyRef: { name: employee-management-config, key: POSTGRES_HOST } }
+            - name: POSTGRES_PORT
+              valueFrom: { configMapKeyRef: { name: employee-management-config, key: POSTGRES_PORT } }
+            - name: POSTGRES_DB
+              valueFrom: { configMapKeyRef: { name: employee-management-config, key: POSTGRES_DB } }
+            # Secrets — from Key Vault (CSI-synced) or the chart/external Secret.
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: employee-management-kv, key: POSTGRES_PASSWORD } }
+            - name: JWT_SECRET
+              valueFrom: { secretKeyRef: { name: employee-management-kv, key: JWT_SECRET } }
+            - name: SEED_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: employee-management-kv, key: SEED_ADMIN_PASSWORD } }
+            # Assembled by Kubernetes from the vars above (no secret in Git).
+            - name: DATABASE_URL
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)"
+          # Startup probe protects slow first-boot (DB connect + migrations/seed).
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          # Graceful shutdown: give the LB time to stop routing before exit.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 250m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            # Mounting the CSI volume is what triggers the Key Vault -> Secret sync.
+            - name: kv-secrets
+              mountPath: /mnt/secrets-store
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: kv-secrets
+          csi:
+            driver: secrets-store.csi.x-k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: employee-management-kv

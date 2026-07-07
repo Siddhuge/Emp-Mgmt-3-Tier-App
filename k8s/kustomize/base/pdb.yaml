@@ -1,0 +1,40 @@
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: employee-management-frontend
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+    app.kubernetes.io/component: frontend
+spec:
+  # Keep this many pods available during voluntary disruptions (drains/upgrades).
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: employee-management
+      app.kubernetes.io/instance: employee-management
+      app.kubernetes.io/component: frontend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: employee-management-backend
+  labels:
+    app.kubernetes.io/name: employee-management
+    app.kubernetes.io/instance: employee-management
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: employee-management
+    environment: "default"
+    app.kubernetes.io/component: backend
+spec:
+  # Keep this many pods available during voluntary disruptions (drains/upgrades).
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: employee-management
+      app.kubernetes.io/instance: employee-management
+      app.kubernetes.io/component: backend

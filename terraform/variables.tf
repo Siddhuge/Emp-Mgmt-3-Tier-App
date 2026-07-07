@@ -87,6 +87,19 @@ variable "acr_sku" {
   default     = "Basic"
 }
 
+# ---- Workload identity (Key Vault access for the app) ----
+variable "app_namespace" {
+  description = "Kubernetes namespace the app runs in. Empty => employee-<environment>."
+  type        = string
+  default     = ""
+}
+
+variable "app_service_account" {
+  description = "Kubernetes ServiceAccount name the app pods use (matches the Helm release: <release>-employee-management)."
+  type        = string
+  default     = "ems-employee-management"
+}
+
 # ---- Application secrets ----
 variable "seed_admin_password" {
   description = "Seed admin password stored in Key Vault. null => auto-generated."

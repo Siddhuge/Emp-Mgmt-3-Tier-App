@@ -55,9 +55,24 @@ app.kubernetes.io/component: {{ .component }}
 
 {{/* Names of the shared ConfigMap and Secret */}}
 {{- define "ems.configMapName" -}}{{ printf "%s-config" (include "ems.fullname" .) }}{{- end -}}
+
+{{/* Kubernetes Secret that the Key Vault CSI driver syncs secrets into */}}
+{{- define "ems.kvSecretName" -}}{{ printf "%s-kv" (include "ems.fullname" .) }}{{- end -}}
+
+{{/*
+Name of the Secret the app reads from. Precedence:
+  1. Key Vault CSI-synced Secret   (keyVault.enabled)
+  2. externally-managed Secret     (secrets.existingSecret)
+  3. chart-created Secret           (default)
+*/}}
 {{- define "ems.secretName" -}}
-{{- if .Values.secrets.existingSecret -}}{{ .Values.secrets.existingSecret }}{{- else -}}{{ printf "%s-secret" (include "ems.fullname" .) }}{{- end -}}
+{{- if .Values.keyVault.enabled -}}{{ include "ems.kvSecretName" . }}
+{{- else if .Values.secrets.existingSecret -}}{{ .Values.secrets.existingSecret }}
+{{- else -}}{{ printf "%s-secret" (include "ems.fullname" .) }}{{- end -}}
 {{- end -}}
+
+{{/* SecretProviderClass name */}}
+{{- define "ems.secretProviderClassName" -}}{{ printf "%s-kv" (include "ems.fullname" .) }}{{- end -}}
 
 {{/* Postgres headless service name (stable network identity) */}}
 {{- define "ems.postgresService" -}}{{ include "ems.componentName" (dict "ctx" . "component" "postgres") }}{{- end -}}

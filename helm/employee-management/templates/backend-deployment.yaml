@@ -29,6 +29,9 @@ spec:
       labels:
         {{- include "ems.labels" . | nindent 8 }}
         app.kubernetes.io/component: {{ $component }}
+        {{- if .Values.keyVault.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
     spec:
       serviceAccountName: {{ include "ems.serviceAccountName" . }}
       automountServiceAccountToken: false
@@ -56,11 +59,30 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.backend.containerPort }}
+          # Non-secret config from the ConfigMap.
           envFrom:
             - configMapRef:
                 name: {{ include "ems.configMapName" . }}
-            - secretRef:
-                name: {{ include "ems.secretName" . }}
+          env:
+            # DB connection parts (non-secret) — referenced by DATABASE_URL below.
+            - name: POSTGRES_USER
+              valueFrom: { configMapKeyRef: { name: {{ include "ems.configMapName" . }}, key: POSTGRES_USER } }
+            - name: POSTGRES_HOST
+              valueFrom: { configMapKeyRef: { name: {{ include "ems.configMapName" . }}, key: POSTGRES_HOST } }
+            - name: POSTGRES_PORT
+              valueFrom: { configMapKeyRef: { name: {{ include "ems.configMapName" . }}, key: POSTGRES_PORT } }
+            - name: POSTGRES_DB
+              valueFrom: { configMapKeyRef: { name: {{ include "ems.configMapName" . }}, key: POSTGRES_DB } }
+            # Secrets — from Key Vault (CSI-synced) or the chart/external Secret.
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "ems.secretName" . }}, key: POSTGRES_PASSWORD } }
+            - name: JWT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ include "ems.secretName" . }}, key: JWT_SECRET } }
+            - name: SEED_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "ems.secretName" . }}, key: SEED_ADMIN_PASSWORD } }
+            # Assembled by Kubernetes from the vars above (no secret in Git).
+            - name: DATABASE_URL
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)"
           # Startup probe protects slow first-boot (DB connect + migrations/seed).
           startupProbe:
             httpGet:
@@ -95,7 +117,21 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.keyVault.enabled }}
+            # Mounting the CSI volume is what triggers the Key Vault -> Secret sync.
+            - name: kv-secrets
+              mountPath: /mnt/secrets-store
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if .Values.keyVault.enabled }}
+        - name: kv-secrets
+          csi:
+            driver: secrets-store.csi.x-k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "ems.secretProviderClassName" . }}
+        {{- end }}
 {{- end -}}

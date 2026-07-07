@@ -1,0 +1,39 @@
+# Smaller footprint for dev.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: employee-management-backend
+spec:
+  template:
+    spec:
+      containers:
+        - name: backend
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: employee-management-frontend
+spec:
+  template:
+    spec:
+      containers:
+        - name: frontend
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: employee-management-postgres
+spec:
+  template:
+    spec:
+      containers:
+        - name: postgres
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }

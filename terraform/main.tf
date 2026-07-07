@@ -43,6 +43,9 @@ locals {
 
   seed_admin_password = coalesce(var.seed_admin_password, try(random_password.seed_admin[0].result, null))
 
+  # Namespace the app is deployed into (defaults to employee-<env> to match Helm).
+  app_namespace = coalesce(var.app_namespace, "employee-${var.environment}")
+
   # Secret names match what the Helm chart / app expect.
   key_vault_secrets = {
     "jwt-secret"          = random_password.jwt_secret.result
@@ -120,12 +123,33 @@ module "aks" {
   tags                       = local.common_tags
 }
 
+# ---- Workload Identity for Key Vault access ----
+# Dedicated user-assigned identity, federated to the app's Kubernetes
+# ServiceAccount via the AKS OIDC issuer. Pods get Key Vault access without any
+# node-wide identity or stored credentials (least privilege).
+resource "azurerm_user_assigned_identity" "kv" {
+  name                = "id-${local.name_prefix}-kv"
+  resource_group_name = azurerm_resource_group.this.name
+  location            = azurerm_resource_group.this.location
+  tags                = local.common_tags
+}
+
+resource "azurerm_federated_identity_credential" "kv" {
+  name                = "fic-${local.name_prefix}-kv"
+  resource_group_name = azurerm_resource_group.this.name
+  parent_id           = azurerm_user_assigned_identity.kv.id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = module.aks.oidc_issuer_url
+  # Trust only this namespace + ServiceAccount (matches the Helm release).
+  subject = "system:serviceaccount:${local.app_namespace}:${var.app_service_account}"
+}
+
 # ---- Role assignments ----
-# AKS Secrets Store CSI identity -> read secrets from Key Vault.
-resource "azurerm_role_assignment" "aks_kv_secrets_user" {
+# The workload-identity UAMI -> read secrets from Key Vault.
+resource "azurerm_role_assignment" "kv_secrets_user" {
   scope                = module.keyvault.id
   role_definition_name = "Key Vault Secrets User"
-  principal_id         = module.aks.secret_provider_object_id
+  principal_id         = azurerm_user_assigned_identity.kv.principal_id
 }
 
 # AKS kubelet identity -> pull images from ACR.
