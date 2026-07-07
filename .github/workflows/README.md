@@ -146,3 +146,54 @@ No GitHub **secrets** are required — auth is fully OIDC.
 - Use **separate CI identities per environment** (repeat step 1–3 per env, and
   move the `AZURE_CLIENT_ID` variable to the GitHub Environment scope).
 - Turn on **required reviewers** and **wait timers** on `test`/prod environments.
+
+---
+
+# Application CI — `ci.yml` (DevSecOps gated build)
+
+Security-gated build pipeline for the app images. Each stage must pass before the
+next runs; **push + sign happen only on `main`** (PRs stop after the image scan).
+
+```
+1 GitLeaks (secrets)  →  2 SonarQube (SAST)  →  3 OWASP Dependency-Check (SCA)
+     →  4 test (pytest + frontend build)  →  5 build + Trivy image scan
+     →  6 push to ACR  →  7 cosign sign (keyless)
+```
+
+Enterprise properties:
+- **Passwordless** — Azure/ACR via OIDC; **keyless** cosign signing (Sigstore/Fulcio,
+  no keys to manage). Verify later with the workflow's OIDC identity.
+- **Hard gates** — GitLeaks (any leak), Sonar **quality gate**, OWASP `--failOnCVSS 7`,
+  Trivy `exit-code 1` on fixable CRITICAL. Findings (SCA) go to the **Security** tab.
+- **Scan before push** — images are built and Trivy-scanned locally; only clean
+  images are pushed, then signed by digest.
+- **Immutable tags** — `:<VERSION>` and `:git-<sha>`.
+
+## Setup
+
+Federated credential for the `main` branch is already created (subject
+`repo:<owner>/<repo>:ref:refs/heads/main`), and the CI identity has AcrPush.
+
+Add these in **Settings → Secrets and variables → Actions**:
+
+| Kind | Name | Value / notes |
+| --- | --- | --- |
+| Variable | `ACR_LOGIN_SERVER` | e.g. `acrempdevyykge.azurecr.io` |
+| Variable | `ACR_NAME` | e.g. `acrempdevyykge` |
+| Variable | `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` | (already set) |
+| Secret | `SONAR_TOKEN` | SonarQube user/project token |
+| Secret | `SONAR_HOST_URL` | your SonarQube server URL |
+| Secret | `NVD_API_KEY` | *(optional)* speeds up OWASP DC |
+| Secret | `GITLEAKS_LICENSE` | *(only for GitHub orgs)* |
+
+Also create the project (`employee-management`) in SonarQube — config lives in
+`sonar-project.properties`.
+
+## Verify a signed image (keyless)
+
+```bash
+cosign verify \
+  --certificate-identity-regexp "https://github.com/<owner>/<repo>/.github/workflows/ci.yml@refs/heads/main" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  <ACR>/backend:<version>
+```
