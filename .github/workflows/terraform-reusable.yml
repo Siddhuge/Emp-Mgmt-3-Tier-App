@@ -117,10 +117,12 @@ jobs:
           exit-code: "0"
 
       - name: Upload Trivy SARIF
+        # trivy-action (a `uses:` step) ignores working-directory, so the SARIF
+        # lands at the workspace root — upload it from there.
         if: inputs.mode == 'plan'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: ${{ inputs.working_directory }}/trivy-iac.sarif
+          sarif_file: trivy-iac.sarif
           category: trivy-iac-${{ inputs.environment }}
 
       - name: Terraform validate
