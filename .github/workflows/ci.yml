@@ -167,6 +167,9 @@ jobs:
     env:
       PUBLISH: ${{ github.ref == 'refs/heads/main' }}
       LOCAL: employee-management/${{ matrix.component }}   # local-only tag for scanning
+      # Accept the Docker Hub username whether it was added as a repo Variable
+      # (recommended — it's not sensitive) or a Secret, to avoid silent skips.
+      DH_USER: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
     steps:
       - uses: actions/checkout@v4
 
@@ -245,19 +248,19 @@ jobs:
       # ------------------------------- Registry 2: Docker Hub --------------------------------
       - name: "Docker Hub · login"
         id: dh-login
-        if: env.PUBLISH == 'true' && vars.DOCKERHUB_USERNAME != ''
+        if: env.PUBLISH == 'true' && env.DH_USER != ''
         continue-on-error: true
         uses: docker/login-action@v3
         with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
+          username: ${{ env.DH_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: "Docker Hub · push + sign"
         id: dh
-        if: env.PUBLISH == 'true' && vars.DOCKERHUB_USERNAME != '' && steps.dh-login.outcome == 'success'
+        if: env.PUBLISH == 'true' && env.DH_USER != '' && steps.dh-login.outcome == 'success'
         continue-on-error: true
         env:
-          REPO: docker.io/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.component }}
+          REPO: docker.io/${{ env.DH_USER }}/${{ matrix.component }}
         run: |
           set -euo pipefail
           for t in "${{ steps.meta.outputs.version }}" "git-${{ steps.meta.outputs.sha }}"; do
@@ -269,9 +272,13 @@ jobs:
           echo "Docker Hub: pushed + signed $REPO@$DIGEST"
 
       - name: "Docker Hub · notify unavailable"
-        if: env.PUBLISH == 'true' && vars.DOCKERHUB_USERNAME != '' && steps.dh.outcome != 'success'
+        if: env.PUBLISH == 'true' && steps.dh.outcome != 'success'
         run: |
-          echo "::warning title=Docker Hub unavailable::${{ matrix.component }} could not be pushed/signed to Docker Hub — continuing."
+          if [ -z "${{ env.DH_USER }}" ]; then
+            echo "::warning title=Docker Hub not configured::Set DOCKERHUB_USERNAME (Variable or Secret) and DOCKERHUB_TOKEN (Secret) to enable Docker Hub publishing."
+          else
+            echo "::warning title=Docker Hub unavailable::${{ matrix.component }} could not be pushed/signed to Docker Hub — continuing."
+          fi
 
       # -------- Gate: succeed if ≥1 registry published; fail only if NONE did --------
       - name: "Publish gate"
