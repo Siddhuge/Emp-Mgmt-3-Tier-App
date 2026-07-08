@@ -155,7 +155,7 @@ Security-gated build pipeline for the app images. Each stage must pass before th
 next runs; **push + sign happen only on `main`** (PRs stop after the image scan).
 
 ```
-1 GitLeaks (secrets)  →  2 SonarQube (SAST)  →  3 OWASP Dependency-Check (SCA)
+1 GitLeaks (secrets)  →  2 SonarQube (SAST)  →  3 SCA (Trivy dependency scan)
      →  4 test (pytest + frontend build)  →  5 build + Trivy image scan
      →  6 push to ACR **and** Docker Hub  →  7 cosign sign (keyless)
 ```
@@ -163,7 +163,7 @@ next runs; **push + sign happen only on `main`** (PRs stop after the image scan)
 Enterprise properties:
 - **Passwordless** — Azure/ACR via OIDC; **keyless** cosign signing (Sigstore/Fulcio,
   no keys to manage). Verify later with the workflow's OIDC identity.
-- **Hard gates** — GitLeaks (any leak), Sonar **quality gate**, OWASP `--failOnCVSS 7`,
+- **Hard gates** — GitLeaks (any leak), Sonar **quality gate**, Trivy **SCA** (fixable HIGH/CRITICAL),
   Trivy `exit-code 1` on fixable CRITICAL. Findings (SCA) go to the **Security** tab.
 - **Scan before push** — images are built and Trivy-scanned locally; only clean
   images are pushed, then signed by digest.
@@ -195,7 +195,6 @@ Add these in **Settings → Secrets and variables → Actions**:
 | Variable | `DOCKERHUB_USERNAME` | your Docker Hub username — *unset to skip Docker Hub* |
 | Secret | `DOCKERHUB_TOKEN` | Docker Hub access token (hub.docker.com → Account Settings → **Personal access tokens** → Read/**Write**) |
 | Secret | `SONAR_TOKEN` | SonarCloud token (host is hardcoded to `sonarcloud.io`) |
-| Secret | `NVD_API_KEY` | *(optional)* speeds up OWASP DC |
 | Secret | `GITLEAKS_LICENSE` | *(only for GitHub orgs)* |
 
 ### SonarCloud (SonarQube Cloud) — free for public repos

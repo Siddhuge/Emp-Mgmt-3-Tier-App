@@ -70,64 +70,36 @@ jobs:
           SONAR_HOST_URL: https://sonarcloud.io
 
   # -------------------------------------------------------------------- 3. SCA
+  # Software Composition Analysis via Trivy: scans dependency manifests/lockfiles
+  # (requirements*.txt, package-lock.json, …) against Trivy's own vuln DB — no NVD
+  # API key, DB pulls in seconds, whole stage ~1-2 min. Gates on fixable HIGH/CRITICAL.
   sca:
-    name: "3 · SCA (OWASP Dependency-Check)"
+    name: "3 · SCA (dependency vulns — Trivy)"
     needs: sast
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Cache the NVD database between runs (first run downloads it).
-      - name: Cache NVD data
-        uses: actions/cache@v4
+      - name: Trivy dependency scan (SARIF + gate)
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
-          path: dc-data
-          key: dependency-check-nvd-${{ github.run_id }}
-          restore-keys: |
-            dependency-check-nvd-
-
-      # Official OWASP Dependency-Check image (multi-format, real NVD updates,
-      # proper multi-flag args). Fails the job on any CVSS >= 7 (High/Critical).
-      - name: OWASP Dependency-Check
-        env:
-          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
-        run: |
-          mkdir -p reports dc-data
-          EXTRA=(--enableRetired)
-          if [ -n "$NVD_API_KEY" ]; then
-            EXTRA+=(--nvdApiKey "$NVD_API_KEY")
-          else
-            echo "::warning title=No NVD API key::Set NVD_API_KEY to avoid slow, rate-limited NVD downloads."
-          fi
-          set +e
-          docker run --rm \
-            -v "$PWD:/src" \
-            -v "$PWD/dc-data:/usr/share/dependency-check/data" \
-            owasp/dependency-check:latest \
-            --scan /src \
-            --project "employee-management" \
-            --exclude "**/node_modules/**" --exclude "**/dist/**" --exclude "**/.git/**" \
-            --format SARIF --format HTML \
-            --out /src/reports \
-            --failOnCVSS 7 \
-            "${EXTRA[@]}"
-          rc=$?
-          sudo chown -R "$(id -u):$(id -g)" reports dc-data 2>/dev/null || true
-          exit $rc
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-sca.sarif
+          exit-code: "1"
+          skip-dirs: node_modules,dist,.git
+          trivyignores: .trivyignore
 
       - name: Upload SCA SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: reports/dependency-check-report.sarif
-          category: owasp-sca
-      - name: Upload SCA report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: owasp-dependency-check-report
-          path: reports
-          retention-days: 14
+          sarif_file: trivy-sca.sarif
+          category: trivy-sca
 
   # ------------------------------------------------------------------- 4. Test
   test:
