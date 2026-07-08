@@ -221,16 +221,18 @@ cosign verify \
 
 # Continuous Deployment — `cd.yml` (Helm to AKS)
 
-Deploys the exact commit `ci.yml` built, scanned, and signed — to AKS via Helm.
-Triggered automatically on CI success, or manually for ad-hoc deploys/redeploys.
+Deploys the exact commit `ci.yml` built, scanned, and signed — to AKS via Helm —
+and gates promotion between environments on **DAST** (dynamic security testing
+against the live deployment), not just static scans.
 
 ```
 CI succeeds on main
-  → dry-run dev  →  [approve]  →  deploy dev  → smoke test
-  → dry-run test →  [approve]  →  deploy test → smoke test
+  → dry-run dev  → [approve] → deploy dev  → smoke test → DAST → tag dev-dast-approved
+  → dry-run test → [approve] → deploy test → smoke test → DAST → tag test-dast-approved
+       (dry-run test refuses to proceed unless the image is dev-dast-approved)
 
 Manual dispatch (any environment, any previously-built commit)
-  → dry-run chosen env → [approve] → deploy chosen env → smoke test
+  → dry-run chosen env → [approve] → deploy chosen env → smoke test → DAST → tag
 ```
 
 ## Why dry-run and deploy are separate jobs
@@ -266,6 +268,9 @@ diff exists, not before. `cd-reusable.yml` runs in one of two modes:
   unavailable — the same "notify, don't fail" pattern as `ci.yml`.
 - **Automatic rollback on failure** — `--atomic` makes Helm roll back to the
   last good revision if the upgrade or its readiness checks fail.
+- **DAST-gated promotion** — dev must pass a live OWASP ZAP scan before its
+  image can be promoted to test (digest-verified, not just tag presence); test
+  runs its own DAST pass again after deploying. See "DAST gate" below.
 - **Self-sufficient cluster bootstrap** — idempotently ensures ingress-nginx,
   cert-manager + ClusterIssuers, and the CoreDNS AKS-hairpin fix are present,
   so CD can stand up a brand-new AKS cluster with no manual pre-steps.
@@ -273,15 +278,48 @@ diff exists, not before. `cd-reusable.yml` runs in one of two modes:
   Environments/federated credentials already created for Terraform (`dev`,
   `test`, `dev-plan`, `test-plan`) and the same `AZURE_CLIENT_ID` identity.
 
+## DAST gate and promotion tags
+
+After every real deploy, `cd-reusable.yml` runs **OWASP ZAP** against the live
+deployment and only proceeds if it passes:
+
+- **Target**: the backend's OpenAPI spec (`https://employee.<env>.sidhuge.xyz/openapi.json`)
+  — ZAP's `openapi` job imports it and exercises every real endpoint at least
+  once, then a **passive-only** scan runs (no active/attack job — see
+  [`dast/zap-plan.template.yaml`](../../dast/zap-plan.template.yaml) for exactly
+  what runs and why). It won't fuzz inputs or mutate app data.
+- **Gate**: fails on any **High**-risk alert (matches the severity bar used
+  everywhere else in this pipeline). ZAP's own `exitStatus` job sets the
+  process exit code, so it fails the step directly — same pattern as the Trivy
+  gates in `ci.yml`.
+- **Report**: HTML + SARIF uploaded as a workflow artifact
+  (`dast-report-<env>-<sha>`), 30-day retention.
+- **On pass**: the exact image digest is tagged `dev-dast-approved` (or
+  `test-dast-approved`) and pushed to **both** ACR and Docker Hub — warns and
+  continues if one registry fails, fails the run only if **both** fail (same
+  resilience rule as `ci.yml`'s image push).
+- **Promotion gate**: before test's dry-run *or* deploy, the pipeline compares
+  `digest(backend:git-<sha>)` against `digest(backend:dev-dast-approved)`. A
+  commit that hasn't passed dev's DAST (or whose approval has since been
+  superseded by a newer commit — these are **rolling** tags, always pointing at
+  the latest approved commit) cannot be promoted to test.
+- **Known limitation (v1)**: the scan is unauthenticated. Endpoints requiring a
+  JWT mostly return 401, so behind-auth business logic isn't deeply exercised
+  yet — still valuable for headers/TLS/CORS/info-disclosure-style checks.
+  Adding a login step + token injection to the ZAP plan is a natural follow-up.
+
 ## Prerequisites
 
 1. **AKS must already exist** for the target environment (`make tf-apply
    TF_ENV=dev`). The dry-run job fails fast with a clear message if
    `rg-emp-<env>` doesn't exist.
-2. Same GitHub **Variables/Secrets** as `ci.yml` (`AZURE_CLIENT_ID/TENANT_ID/
+2. **DNS** — `employee.<env>.sidhuge.xyz` must resolve to that environment's
+   ingress LoadBalancer IP (same prerequisite as reaching the app normally;
+   DAST scans this public URL).
+3. Same GitHub **Variables/Secrets** as `ci.yml` (`AZURE_CLIENT_ID/TENANT_ID/
    SUBSCRIPTION_ID`, `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, optionally
    `ACR_LOGIN_SERVER`/`ACR_NAME`) — already set if `ci.yml` is working.
-3. *(Optional, once ACR exists again)* grant the CI identity `AcrPull` so CD can
+4. *(Optional, once ACR exists again)* grant the CI identity `AcrPull` so CD can
    verify/pull from ACR — Contributor alone does **not** include ACR data-plane
    actions. Set `ci_identity_principal_id` in `terraform/*.tfvars`:
    ```hcl

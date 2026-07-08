@@ -1,0 +1,52 @@
+# OWASP ZAP Automation Framework plan — passive, spec-informed DAST.
+#
+# Imports the backend's OpenAPI definition (so every real endpoint gets
+# exercised at least once with schema-shaped requests), then runs ONLY a
+# passive scan — no active/attack job — so it doesn't fuzz or mutate app data.
+# Gates via the exitStatus job: zap.sh exits non-zero if any High-risk alert
+# was found, which is what the CD pipeline treats as "DAST failed".
+#
+# TARGET_URL / API_URL are substituted by cd-reusable.yml (envsubst) before
+# each run — this file is a template, not run directly.
+#
+# Known limitation (v1): unauthenticated. Endpoints requiring a JWT mostly
+# respond 401, so behind-auth business logic isn't deeply exercised yet —
+# still valuable for headers/TLS/info-disclosure/CORS-style passive checks.
+# A follow-up could add a `requestor` job to log in and inject the token.
+env:
+  contexts:
+    - name: "employee-management"
+      urls:
+        - "${TARGET_URL}"
+  parameters:
+    failOnError: true
+    progressToStdout: true
+
+jobs:
+  - type: openapi
+    parameters:
+      apiUrl: "${API_URL}"
+      targetUrl: "${TARGET_URL}"
+
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 5
+
+  - type: report
+    parameters:
+      template: "risk-confidence-html"
+      reportDir: "/zap/wrk"
+      reportFile: "zap-report"
+      reportTitle: "Employee Management — DAST Report"
+
+  - type: report
+    parameters:
+      template: "sarif-json"
+      reportDir: "/zap/wrk"
+      reportFile: "zap-report-sarif"
+
+  # Sets the process exit code: non-zero if any alert >= errorLevel was found.
+  - type: exitStatus
+    parameters:
+      errorLevel: High
+      warnLevel: Medium

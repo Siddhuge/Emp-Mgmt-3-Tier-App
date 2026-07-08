@@ -1,10 +1,16 @@
-# Reusable CD job: dry-run OR real Helm deploy to AKS.
+# Reusable CD job: dry-run OR real Helm deploy to AKS, gated by DAST.
 #
-#   dry-run : discover infra -> resolve registry -> cosign verify -> helm upgrade
-#             --dry-run (no cluster mutation). Ungated ("<env>-plan" environment).
+#   dry-run : discover infra -> resolve registry -> cosign verify -> (test only:
+#             verify dev-dast-approved) -> helm upgrade --dry-run (no cluster
+#             mutation). Ungated ("<env>-plan" environment).
 #   deploy  : same, for real: bootstrap cluster prereqs -> helm upgrade --atomic
-#             --wait -> helm test (smoke test). Gated (protected "<env>" environment,
-#             approval happens AFTER the dry-run job already showed the diff).
+#             --wait -> helm test -> DAST scan (OWASP ZAP) against the live
+#             deployment -> on pass, tag+push "<env>-dast-approved" to ACR and
+#             Docker Hub. Gated (protected "<env>" environment; approval
+#             happens AFTER the dry-run job already showed the diff).
+#
+# Promotion: test will only deploy an image whose digest matches the
+# "dev-dast-approved" tag — i.e. it must have already passed DAST in dev.
 #
 # AKS/Key Vault/ACR names are DISCOVERED AT RUNTIME via `az` queries scoped to
 # rg-emp-<env> — never hardcoded — so the pipeline survives Terraform
@@ -136,6 +142,29 @@ jobs:
           echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
           [ "$REGISTRY" = "docker.io/$DH_USER" ] && echo "needs_pull_secret=true" >> "$GITHUB_OUTPUT" || echo "needs_pull_secret=false" >> "$GITHUB_OUTPUT"
 
+      # ---- Promotion gate: test may only deploy images already DAST-approved
+      #      in dev. Runs in BOTH modes so dry-run catches this before anyone
+      #      is asked to approve. Compares digests (not just tag presence) —
+      #      "dev-dast-approved" is a rolling tag, so this also protects
+      #      against deploying a commit whose approval has since been
+      #      superseded by a newer commit's approval.
+      - name: "Promotion gate: verify dev-dast-approved"
+        if: inputs.environment == 'test'
+        env:
+          REGISTRY: ${{ steps.resolve.outputs.registry }}
+        run: |
+          set -euo pipefail
+          digest_of() {
+            docker buildx imagetools inspect "$1" 2>/dev/null | awk '/^Digest:/{print $2; exit}'
+          }
+          SHA_DIGEST=$(digest_of "$REGISTRY/backend:$TAG")
+          APPROVED_DIGEST=$(digest_of "$REGISTRY/backend:dev-dast-approved" || true)
+          if [ -z "$SHA_DIGEST" ] || [ -z "$APPROVED_DIGEST" ] || [ "$SHA_DIGEST" != "$APPROVED_DIGEST" ]; then
+            echo "::error title=Not DAST-approved::$TAG has not passed dev DAST (or a newer commit's approval has since superseded the dev-dast-approved tag). Promote it through dev first."
+            exit 1
+          fi
+          echo "✓ $TAG matches dev-dast-approved ($SHA_DIGEST) — cleared for test."
+
       - name: Get AKS credentials
         run: az aks get-credentials -g "$RG" -n "$AKS_NAME" --overwrite-existing --only-show-errors
 
@@ -225,11 +254,99 @@ jobs:
         if: inputs.mode == 'deploy'
         run: helm test "$RELEASE" -n "$NAMESPACE" --timeout 2m
 
+      - name: Wait for TLS certificate
+        if: inputs.mode == 'deploy'
+        run: |
+          set -euo pipefail
+          SECRET=$(kubectl get ingress "$RELEASE-employee-management" -n "$NAMESPACE" -o jsonpath='{.spec.tls[0].secretName}' 2>/dev/null || true)
+          if [ -z "$SECRET" ]; then
+            echo "No TLS configured on the ingress, skipping cert wait."
+            exit 0
+          fi
+          for i in $(seq 1 20); do
+            READY=$(kubectl get certificate "$SECRET" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            [ "$READY" = "True" ] && { echo "Certificate $SECRET is Ready."; exit 0; }
+            sleep 15
+          done
+          echo "::warning title=Certificate not ready::TLS cert $SECRET did not become Ready in time; DAST HTTPS requests may fail."
+
+      # ---- DAST gate: OWASP ZAP, passive + OpenAPI-informed (see
+      #      dast/zap-plan.template.yaml for exactly what runs and why).
+      #      Fails this step (via ZAP's own exitStatus job) on any High-risk
+      #      alert — same severity bar as the rest of this pipeline.
+      - name: DAST scan (OWASP ZAP)
+        if: inputs.mode == 'deploy'
+        run: |
+          set -euo pipefail
+          HOST=$(kubectl get ingress "$RELEASE-employee-management" -n "$NAMESPACE" -o jsonpath='{.spec.rules[0].host}')
+          mkdir -p "$PWD/zap-out"
+          sed -e "s|\${TARGET_URL}|https://$HOST|g" -e "s|\${API_URL}|https://$HOST/openapi.json|g" \
+            dast/zap-plan.template.yaml > "$PWD/zap-out/zap-plan.yaml"
+          docker run --rm -u "$(id -u):$(id -g)" -v "$PWD/zap-out:/zap/wrk:rw" -t ghcr.io/zaproxy/zaproxy:stable \
+            zap.sh -cmd -autorun /zap/wrk/zap-plan.yaml
+
+      - name: Upload DAST report
+        if: inputs.mode == 'deploy' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-report-${{ inputs.environment }}-${{ inputs.git_sha }}
+          path: zap-out/zap-report*
+          retention-days: 30
+
+      # ---- Record the DAST pass by tagging + pushing to both registries.
+      #      Only runs if the DAST step above succeeded (default job-success
+      #      gating — no output plumbing needed). Fails only if BOTH
+      #      registries fail to receive the tag.
+      - name: Tag + push DAST-approved images
+        if: inputs.mode == 'deploy'
+        env:
+          ACR_NAME: ${{ steps.infra.outputs.acr_name }}
+          DH_USER: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          APPROVED_TAG="${{ inputs.environment }}-dast-approved"
+          SRC_REGISTRY="${{ steps.resolve.outputs.registry }}"
+          COMPONENTS="backend frontend database-init"
+
+          push_to() {
+            local dest_host="$1"
+            for c in $COMPONENTS; do
+              docker buildx imagetools create --tag "$dest_host/$c:$APPROVED_TAG" "$SRC_REGISTRY/$c:$TAG" || return 1
+            done
+          }
+
+          ACR_OK=false
+          DH_OK=false
+
+          if [ -n "$ACR_NAME" ]; then
+            if push_to "${ACR_NAME}.azurecr.io"; then
+              ACR_OK=true
+              echo "✓ Tagged $APPROVED_TAG on ACR"
+            else
+              echo "::warning title=ACR tag/push failed::Could not tag $APPROVED_TAG on ACR — will still try Docker Hub."
+            fi
+          fi
+
+          if [ -n "$DH_USER" ]; then
+            if push_to "docker.io/$DH_USER"; then
+              DH_OK=true
+              echo "✓ Tagged $APPROVED_TAG on Docker Hub"
+            else
+              echo "::warning title=Docker Hub tag/push failed::Could not tag $APPROVED_TAG on Docker Hub."
+            fi
+          fi
+
+          if [ "$ACR_OK" != "true" ] && [ "$DH_OK" != "true" ]; then
+            echo "::error title=Could not record DAST approval::Failed to push $APPROVED_TAG to BOTH ACR and Docker Hub."
+            exit 1
+          fi
+
       - name: Deployment summary
         if: inputs.mode == 'deploy'
         run: |
           {
             echo "### Deployed \`${{ inputs.environment }}\` — image tag \`$TAG\` from \`${{ steps.resolve.outputs.registry }}\`"
+            echo "DAST: passed → tagged \`${{ inputs.environment }}-dast-approved\`"
             echo '```'
             helm status "$RELEASE" -n "$NAMESPACE" -o table
             echo '```'

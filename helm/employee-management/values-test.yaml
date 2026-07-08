@@ -1,0 +1,58 @@
+# ---- Test environment overrides ----
+# Matches Terraform's "test" AKS environment (rg-emp-test / aks-emp-test):
+# Standard_B2ms, cluster autoscaler 1..3 nodes — sized to exercise HPA/scaling
+# a bit more than dev without needing stage/prod-sized infra.
+global:
+  environment: test
+
+config:
+  logLevel: info
+  accessTokenExpireMinutes: "240"
+  corsOrigins: "https://employee.test.sidhuge.xyz"
+
+# Secrets come from Azure Key Vault via the CSI driver + Workload Identity —
+# nothing hardcoded here. name / tenantId / clientId are injected at deploy time
+# (see `terraform output helm_keyvault_set_flags`, or discovered live by cd.yml).
+keyVault:
+  enabled: true
+
+podAntiAffinity: soft
+
+frontend:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 250m, memory: 256Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+
+backend:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+
+postgres:
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  persistence:
+    size: 2Gi
+
+ingress:
+  host: employee.test.sidhuge.xyz
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  tls:
+    enabled: true
+    secretName: employee-test-tls
+
+networkPolicy:
+  enabled: true
