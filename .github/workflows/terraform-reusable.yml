@@ -114,6 +114,10 @@ jobs:
           format: sarif
           output: trivy-iac.sarif
           severity: HIGH,CRITICAL
+          # Without this, trivy-action drops the severity filter for SARIF
+          # output entirely (see its entrypoint.sh) — the report would silently
+          # include LOW/MEDIUM findings too.
+          limit-severities-for-sarif: "true"
           exit-code: "0"
 
       - name: Upload Trivy SARIF

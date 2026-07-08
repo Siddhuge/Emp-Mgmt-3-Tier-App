@@ -80,7 +80,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Trivy dependency scan (SARIF + gate)
+      # Human-readable table PRINTED TO THE LOG and the gate, in one step — so a
+      # failure is self-explanatory here without needing the Security tab.
+      - name: Trivy dependency scan (table + gate)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
@@ -88,9 +90,30 @@ jobs:
           scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          format: table
+          exit-code: "1"
+          skip-dirs: node_modules,dist,.git
+          trivyignores: .trivyignore
+
+      # Separate, non-blocking SARIF run for the Security tab (always runs, even
+      # if the gate above failed, so findings are visible there too).
+      # NOTE: trivy-action drops the `severity` filter entirely for SARIF output
+      # unless limit-severities-for-sarif is explicitly "true" (see its
+      # entrypoint.sh) — without it, the report (and any gate sharing this
+      # invocation) silently covers ALL severities, not just HIGH/CRITICAL.
+      - name: Trivy dependency scan (SARIF for Security tab)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: "true"
+          ignore-unfixed: true
           format: sarif
           output: trivy-sca.sarif
-          exit-code: "1"
+          exit-code: "0"
           skip-dirs: node_modules,dist,.git
           trivyignores: .trivyignore
 
