@@ -1,0 +1,236 @@
+# Reusable CD job: dry-run OR real Helm deploy to AKS.
+#
+#   dry-run : discover infra -> resolve registry -> cosign verify -> helm upgrade
+#             --dry-run (no cluster mutation). Ungated ("<env>-plan" environment).
+#   deploy  : same, for real: bootstrap cluster prereqs -> helm upgrade --atomic
+#             --wait -> helm test (smoke test). Gated (protected "<env>" environment,
+#             approval happens AFTER the dry-run job already showed the diff).
+#
+# AKS/Key Vault/ACR names are DISCOVERED AT RUNTIME via `az` queries scoped to
+# rg-emp-<env> — never hardcoded — so the pipeline survives Terraform
+# re-applies that regenerate random name suffixes (a real recurring issue in
+# this project). Auth is passwordless (OIDC); only the ALREADY-EXISTING
+# Terraform GitHub Environments/federated-credentials are reused — no new
+# Azure setup is required for CD.
+name: cd-reusable
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment (dev or test)."
+        type: string
+        required: true
+      mode:
+        description: "dry-run or deploy."
+        type: string
+        required: true
+      git_sha:
+        description: "Short (7-char) commit SHA whose images to deploy (matches the git-<sha> image tag CI pushed)."
+        type: string
+        required: true
+      ref:
+        description: "Git ref to check out (chart source) — normally the same commit."
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  cd:
+    name: "${{ inputs.environment }} · ${{ inputs.mode }}"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.mode == 'deploy' && inputs.environment || format('{0}-plan', inputs.environment) }}
+    concurrency:
+      group: cd-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      RG: rg-emp-${{ inputs.environment }}
+      AKS_NAME: aks-emp-${{ inputs.environment }}
+      NAMESPACE: employee-${{ inputs.environment }}
+      RELEASE: ems
+      TAG: git-${{ inputs.git_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Discover cluster infra (no hardcoded names)
+        id: infra
+        run: |
+          set -euo pipefail
+          if [ "$(az group exists -n "$RG")" != "true" ]; then
+            echo "::error title=Cluster not found::Resource group $RG doesn't exist. Run 'make tf-apply TF_ENV=${{ inputs.environment }}' first."
+            exit 1
+          fi
+          KV_NAME=$(az keyvault list -g "$RG" --query "[0].name" -o tsv)
+          TENANT_ID=$(az account show --query tenantId -o tsv)
+          KV_CLIENT_ID=$(az identity show -g "$RG" -n "id-emp-${{ inputs.environment }}-kv" --query clientId -o tsv)
+          ACR_NAME=$(az acr list -g "$RG" --query "[0].name" -o tsv || true)
+          {
+            echo "kv_name=$KV_NAME"
+            echo "tenant_id=$TENANT_ID"
+            echo "kv_client_id=$KV_CLIENT_ID"
+            echo "acr_name=$ACR_NAME"
+          } >> "$GITHUB_OUTPUT"
+          echo "Key Vault: $KV_NAME | ACR: ${ACR_NAME:-<none>}"
+
+      - uses: sigstore/cosign-installer@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # ---- Resolve ONE registry that has ALL THREE component images for this
+      #      SHA, verify each is signed by OUR CI workflow (supply-chain gate),
+      #      preferring ACR (same-cloud, no pull secret needed) over Docker Hub.
+      - name: Resolve + verify signed images
+        id: resolve
+        env:
+          ACR_NAME: ${{ steps.infra.outputs.acr_name }}
+          DH_USER: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          IDENTITY_RE="https://github.com/${{ github.repository }}/\.github/workflows/ci\.yml@refs/heads/main"
+          ISSUER="https://token.actions.githubusercontent.com"
+          COMPONENTS="backend frontend database-init"
+
+          verify_all() {
+            local host="$1"
+            for c in $COMPONENTS; do
+              docker buildx imagetools inspect "$host/$c:$TAG" >/dev/null 2>&1 || return 1
+              cosign verify --certificate-identity-regexp "$IDENTITY_RE" \
+                --certificate-oidc-issuer "$ISSUER" "$host/$c:$TAG" >/dev/null 2>&1 || return 1
+            done
+            return 0
+          }
+
+          REGISTRY=""
+          if [ -n "$ACR_NAME" ]; then
+            az acr login --name "$ACR_NAME" >/dev/null 2>&1 || true
+            if verify_all "${ACR_NAME}.azurecr.io"; then
+              REGISTRY="${ACR_NAME}.azurecr.io"
+              echo "✓ All 3 images present + signed in ACR ($REGISTRY)"
+            else
+              echo "::warning title=ACR unavailable::Images for $TAG not fully present/verified in ACR — trying Docker Hub."
+            fi
+          fi
+
+          if [ -z "$REGISTRY" ] && [ -n "$DH_USER" ]; then
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "$DH_USER" --password-stdin >/dev/null 2>&1 || true
+            if verify_all "docker.io/$DH_USER"; then
+              REGISTRY="docker.io/$DH_USER"
+              echo "✓ All 3 images present + signed in Docker Hub ($REGISTRY)"
+            fi
+          fi
+
+          if [ -z "$REGISTRY" ]; then
+            echo "::error title=No usable registry::No registry has all 3 signed images for tag $TAG. Check the CI run for this commit."
+            exit 1
+          fi
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+          [ "$REGISTRY" = "docker.io/$DH_USER" ] && echo "needs_pull_secret=true" >> "$GITHUB_OUTPUT" || echo "needs_pull_secret=false" >> "$GITHUB_OUTPUT"
+
+      - name: Get AKS credentials
+        run: az aks get-credentials -g "$RG" -n "$AKS_NAME" --overwrite-existing --only-show-errors
+
+      # ---- From here on, real cluster mutations are DEPLOY-ONLY ----
+      - name: "Bootstrap: ingress-nginx controller"
+        if: inputs.mode == 'deploy'
+        run: |
+          if ! kubectl get ns ingress-nginx >/dev/null 2>&1; then
+            kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/cloud/deploy.yaml
+            kubectl -n ingress-nginx wait --for=condition=ready pod -l app.kubernetes.io/component=controller --timeout=180s
+          else
+            echo "ingress-nginx already present, skipping."
+          fi
+
+      - name: "Bootstrap: cert-manager + ClusterIssuers"
+        if: inputs.mode == 'deploy'
+        run: |
+          if ! kubectl get ns cert-manager >/dev/null 2>&1; then
+            kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.3/cert-manager.yaml
+            kubectl -n cert-manager rollout status deploy/cert-manager --timeout=150s
+            kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=150s
+            kubectl -n cert-manager rollout status deploy/cert-manager-cainjector --timeout=150s
+            sleep 15  # webhook readiness lag
+          fi
+          kubectl apply -f manifests/cluster-issuers.yaml
+
+      - name: "Bootstrap: CoreDNS AKS hairpin fix"
+        if: inputs.mode == 'deploy'
+        run: |
+          kubectl apply -f manifests/coredns-hairpin.yaml
+          kubectl -n kube-system rollout restart deploy/coredns
+          kubectl -n kube-system rollout status deploy/coredns --timeout=90s
+
+      - name: "Docker Hub image pull secret"
+        if: inputs.mode == 'deploy' && steps.resolve.outputs.needs_pull_secret == 'true'
+        env:
+          DH_USER: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
+        run: |
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret docker-registry dockerhub-pull-secret \
+            --docker-server=https://index.docker.io/v1/ \
+            --docker-username="$DH_USER" \
+            --docker-password="${{ secrets.DOCKERHUB_TOKEN }}" \
+            -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+      # ---- Helm dry-run OR real deploy ----
+      - name: Helm dry-run
+        if: inputs.mode == 'dry-run'
+        run: |
+          set -euo pipefail
+          helm upgrade --install "$RELEASE" ./helm/employee-management \
+            -n "$NAMESPACE" --create-namespace \
+            -f "./helm/employee-management/values-${{ inputs.environment }}.yaml" \
+            --set image.registry="${{ steps.resolve.outputs.registry }}" \
+            --set backend.image.tag="$TAG" --set frontend.image.tag="$TAG" --set postgres.image.tag="$TAG" \
+            --set keyVault.enabled=true \
+            --set keyVault.name="${{ steps.infra.outputs.kv_name }}" \
+            --set keyVault.tenantId="${{ steps.infra.outputs.tenant_id }}" \
+            --set keyVault.clientId="${{ steps.infra.outputs.kv_client_id }}" \
+            $([ "${{ steps.resolve.outputs.needs_pull_secret }}" = "true" ] && echo "--set imagePullSecrets[0].name=dockerhub-pull-secret") \
+            --dry-run --debug 2>&1 | tee dry-run-output.txt
+          # Truncated copy for the job summary (GitHub caps summary size); full
+          # output is already in the log above via tee.
+          {
+            echo "### Helm dry-run — \`${{ inputs.environment }}\` (image tag \`$TAG\`)"
+            echo '```'
+            head -c 60000 dry-run-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Helm deploy (atomic — auto rollback on failure)
+        if: inputs.mode == 'deploy'
+        run: |
+          helm upgrade --install "$RELEASE" ./helm/employee-management \
+            -n "$NAMESPACE" --create-namespace \
+            -f "./helm/employee-management/values-${{ inputs.environment }}.yaml" \
+            --set image.registry="${{ steps.resolve.outputs.registry }}" \
+            --set backend.image.tag="$TAG" --set frontend.image.tag="$TAG" --set postgres.image.tag="$TAG" \
+            --set keyVault.enabled=true \
+            --set keyVault.name="${{ steps.infra.outputs.kv_name }}" \
+            --set keyVault.tenantId="${{ steps.infra.outputs.tenant_id }}" \
+            --set keyVault.clientId="${{ steps.infra.outputs.kv_client_id }}" \
+            $([ "${{ steps.resolve.outputs.needs_pull_secret }}" = "true" ] && echo "--set imagePullSecrets[0].name=dockerhub-pull-secret") \
+            --atomic --wait --timeout 8m0s
+
+      - name: Smoke test (helm test)
+        if: inputs.mode == 'deploy'
+        run: helm test "$RELEASE" -n "$NAMESPACE" --timeout 2m
+
+      - name: Deployment summary
+        if: inputs.mode == 'deploy'
+        run: |
+          {
+            echo "### Deployed \`${{ inputs.environment }}\` — image tag \`$TAG\` from \`${{ steps.resolve.outputs.registry }}\`"
+            echo '```'
+            helm status "$RELEASE" -n "$NAMESPACE" -o table
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

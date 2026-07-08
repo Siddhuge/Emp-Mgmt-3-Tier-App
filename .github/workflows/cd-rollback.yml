@@ -1,0 +1,75 @@
+# Manual, guarded rollback to a previous Helm release revision.
+# Requires typing the environment name to confirm, and still passes through the
+# environment's approval gate. (Failed deploys already auto-rollback via
+# `helm upgrade --atomic` in cd-reusable.yml — this is for INTENTIONAL rollback
+# of a deploy that succeeded but is now considered bad.)
+name: cd-rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to roll back"
+        type: choice
+        options: [dev, test]
+        required: true
+      revision:
+        description: 'Helm revision to roll back to (blank = previous revision). See "helm history ems -n <ns>".'
+        type: string
+        required: false
+      confirm:
+        description: 'Type the environment name to confirm (e.g. "dev")'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify confirmation matches the target environment
+        run: |
+          if [ "${{ inputs.confirm }}" != "${{ inputs.environment }}" ]; then
+            echo "::error::Confirmation '${{ inputs.confirm }}' does not match environment '${{ inputs.environment }}'."
+            exit 1
+          fi
+
+  rollback:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      RG: rg-emp-${{ inputs.environment }}
+      AKS_NAME: aks-emp-${{ inputs.environment }}
+      NAMESPACE: employee-${{ inputs.environment }}
+      RELEASE: ems
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS credentials
+        run: az aks get-credentials -g "$RG" -n "$AKS_NAME" --overwrite-existing --only-show-errors
+
+      - name: History before rollback
+        run: helm history "$RELEASE" -n "$NAMESPACE"
+
+      - name: Roll back
+        run: helm rollback "$RELEASE" ${{ inputs.revision }} -n "$NAMESPACE" --wait --timeout 5m0s
+
+      - name: Smoke test
+        run: helm test "$RELEASE" -n "$NAMESPACE" --timeout 2m
+
+      - name: Summary
+        run: |
+          {
+            echo "### Rolled back \`${{ inputs.environment }}\` to revision \`${{ inputs.revision || 'previous' }}\`"
+            echo '```'
+            helm history "$RELEASE" -n "$NAMESPACE"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

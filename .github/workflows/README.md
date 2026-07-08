@@ -216,3 +216,91 @@ cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   <ACR>/backend:<version>
 ```
+
+---
+
+# Continuous Deployment — `cd.yml` (Helm to AKS)
+
+Deploys the exact commit `ci.yml` built, scanned, and signed — to AKS via Helm.
+Triggered automatically on CI success, or manually for ad-hoc deploys/redeploys.
+
+```
+CI succeeds on main
+  → dry-run dev  →  [approve]  →  deploy dev  → smoke test
+  → dry-run test →  [approve]  →  deploy test → smoke test
+
+Manual dispatch (any environment, any previously-built commit)
+  → dry-run chosen env → [approve] → deploy chosen env → smoke test
+```
+
+## Why dry-run and deploy are separate jobs
+
+Same reason as the Terraform pipeline: a GitHub Environment approval gate pauses
+a job **before its first step**, so approval must happen *after* a reviewable
+diff exists, not before. `cd-reusable.yml` runs in one of two modes:
+
+1. **dry-run** (ungated `<env>-plan` environment) — resolves the registry,
+   verifies signatures, runs `helm upgrade --dry-run --debug`. Output goes to
+   the job summary.
+2. **deploy** (`needs` the dry-run job, protected `<env>` environment) —
+   approval happens here, then it bootstraps cluster prerequisites and runs the
+   real `helm upgrade --atomic --wait`, followed by `helm test` as a smoke test.
+
+## What makes this enterprise-grade
+
+- **No stale config** — AKS/Key Vault/ACR resource names are **discovered at
+  runtime** via `az` queries scoped to `rg-emp-<env>` (never hardcoded GitHub
+  Variables). This project hit real pain from Terraform re-applies regenerating
+  random name suffixes (ACR, Key Vault) — discovery makes CD immune to that.
+- **Deploys an exact, immutable commit** — uses the `git-<sha>` image tag (not
+  the mutable `:<version>` tag), so every deploy is tied to one auditable
+  commit; rollback = redeploy any previously-built SHA.
+- **Supply-chain verified** — before every dry-run *and* every deploy (not
+  cached from earlier in the pipeline — approvals can sit for hours), it
+  re-verifies each image's **cosign signature** against the CI workflow's OIDC
+  identity. An unsigned or tampered image is never deployed, even if a
+  same-tag image exists in a registry.
+- **Resilient dual-registry** — mirrors the CI pipeline's philosophy: prefers
+  ACR (same-cloud, no pull secret) and falls back to Docker Hub automatically
+  (creating/refreshing the `dockerhub-pull-secret` in-namespace) if ACR is
+  unavailable — the same "notify, don't fail" pattern as `ci.yml`.
+- **Automatic rollback on failure** — `--atomic` makes Helm roll back to the
+  last good revision if the upgrade or its readiness checks fail.
+- **Self-sufficient cluster bootstrap** — idempotently ensures ingress-nginx,
+  cert-manager + ClusterIssuers, and the CoreDNS AKS-hairpin fix are present,
+  so CD can stand up a brand-new AKS cluster with no manual pre-steps.
+- **No new Azure setup required** — reuses the exact GitHub
+  Environments/federated credentials already created for Terraform (`dev`,
+  `test`, `dev-plan`, `test-plan`) and the same `AZURE_CLIENT_ID` identity.
+
+## Prerequisites
+
+1. **AKS must already exist** for the target environment (`make tf-apply
+   TF_ENV=dev`). The dry-run job fails fast with a clear message if
+   `rg-emp-<env>` doesn't exist.
+2. Same GitHub **Variables/Secrets** as `ci.yml` (`AZURE_CLIENT_ID/TENANT_ID/
+   SUBSCRIPTION_ID`, `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, optionally
+   `ACR_LOGIN_SERVER`/`ACR_NAME`) — already set if `ci.yml` is working.
+3. *(Optional, once ACR exists again)* grant the CI identity `AcrPull` so CD can
+   verify/pull from ACR — Contributor alone does **not** include ACR data-plane
+   actions. Set `ci_identity_principal_id` in `terraform/*.tfvars`:
+   ```hcl
+   ci_identity_principal_id = "830a38d5-c555-41a1-b254-2895d64ddec5"  # the CI SP's object id
+   ```
+
+## Manual deploy / redeploy / promote a hotfix
+
+**Actions → cd → Run workflow** → pick `environment`, optionally set `git_sha`
+to redeploy any previously-built commit (defaults to latest `main`). Useful for
+redeploying test independently of dev, or re-running a deploy that failed for
+an infra reason (cluster was still coming up, etc.) without re-running CI.
+
+## Rollback — `cd-rollback.yml`
+
+Failed deploys already auto-rollback (`--atomic`). For an **intentional**
+rollback of a deploy that succeeded but is now considered bad:
+
+**Actions → cd-rollback → Run workflow** → pick environment, optionally a
+specific Helm revision (blank = previous), type the environment name to
+confirm (guarded, mirrors `terraform-destroy.yml`) → approve → rolls back +
+smoke tests.

@@ -159,3 +159,13 @@ resource "azurerm_role_assignment" "aks_acr_pull" {
   role_definition_name = "AcrPull"
   principal_id         = module.aks.kubelet_identity_object_id
 }
+
+# Optional: CI/CD identity -> pull/inspect images in ACR (needed for the CD
+# pipeline's `az acr login` + signature verification step). Contributor alone
+# does NOT include this — ACR push/pull are data-plane actions.
+resource "azurerm_role_assignment" "ci_acr_pull" {
+  count                = var.enable_acr && var.ci_identity_principal_id != null ? 1 : 0
+  scope                = azurerm_container_registry.this[0].id
+  role_definition_name = "AcrPull"
+  principal_id         = var.ci_identity_principal_id
+}

@@ -87,6 +87,17 @@ variable "acr_sku" {
   default     = "Basic"
 }
 
+variable "ci_identity_principal_id" {
+  description = <<-EOT
+    Object (principal) ID of the CI/CD service principal (the Entra app used by
+    GitHub Actions OIDC). When set, it's granted AcrPull on this environment's
+    ACR so the CD pipeline can pull/inspect images for signature verification.
+    Optional — leave null if not using ACR from CI/CD.
+  EOT
+  type        = string
+  default     = null
+}
+
 # ---- Workload identity (Key Vault access for the app) ----
 variable "app_namespace" {
   description = "Kubernetes namespace the app runs in. Empty => employee-<environment>."

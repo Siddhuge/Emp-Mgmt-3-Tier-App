@@ -14,6 +14,10 @@ image:
   registry: employee-management
   pullPolicy: IfNotPresent
 
+# Pull secrets for private registries (e.g. Docker Hub). Not needed for ACR when
+# the AKS kubelet identity has AcrPull. Example: [{name: dockerhub-pull-secret}]
+imagePullSecrets: []
+
 # ---- Non-secret configuration (rendered into a ConfigMap) ----
 config:
   # Client-facing API URL. Empty => the frontend uses a relative "/api" path

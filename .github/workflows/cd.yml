@@ -1,0 +1,121 @@
+# Continuous Deployment — Helm to AKS.
+#   CI succeeds on main -> dry-run dev -> [approve] -> deploy dev -> smoke test
+#                        -> dry-run test -> [approve] -> deploy test -> smoke test
+#   Manual dispatch      -> dry-run the chosen env -> [approve] -> deploy it
+#
+# Deploys the EXACT commit CI built and signed (git-<sha> image tag), and
+# verifies each image's cosign signature immediately before every deploy —
+# never trusts a cached decision from an earlier point in the pipeline.
+# Reuses the SAME GitHub Environments/federated credentials already set up for
+# Terraform (dev, test, dev-plan, test-plan) — no new Azure setup required.
+name: cd
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy"
+        type: choice
+        options: [dev, test]
+        required: true
+      git_sha:
+        description: "Commit SHA to deploy (short or full). Defaults to the latest commit on main."
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  context:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.ctx.outputs.sha }}
+      ref: ${{ steps.ctx.outputs.ref }}
+    steps:
+      - id: ctx
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            REF="${{ github.event.workflow_run.head_sha }}"
+          else
+            REF="${{ inputs.git_sha }}"
+            REF="${REF:-${{ github.sha }}}"
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "sha=${REF:0:7}" >> "$GITHUB_OUTPUT"
+
+  # ---------------- Auto promotion (CI success on main): dev -> test ----------------
+  dry-run-dev:
+    needs: context
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    uses: ./.github/workflows/cd-reusable.yml
+    with:
+      environment: dev
+      mode: dry-run
+      git_sha: ${{ needs.context.outputs.sha }}
+      ref: ${{ needs.context.outputs.ref }}
+    secrets: inherit
+
+  deploy-dev:
+    needs: [context, dry-run-dev]
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    uses: ./.github/workflows/cd-reusable.yml
+    with:
+      environment: dev
+      mode: deploy
+      git_sha: ${{ needs.context.outputs.sha }}
+      ref: ${{ needs.context.outputs.ref }}
+    secrets: inherit
+
+  dry-run-test:
+    needs: [context, deploy-dev]
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    uses: ./.github/workflows/cd-reusable.yml
+    with:
+      environment: test
+      mode: dry-run
+      git_sha: ${{ needs.context.outputs.sha }}
+      ref: ${{ needs.context.outputs.ref }}
+    secrets: inherit
+
+  deploy-test:
+    needs: [context, dry-run-test]
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    uses: ./.github/workflows/cd-reusable.yml
+    with:
+      environment: test
+      mode: deploy
+      git_sha: ${{ needs.context.outputs.sha }}
+      ref: ${{ needs.context.outputs.ref }}
+    secrets: inherit
+
+  # ---------------- Manual single-environment deploy (ad-hoc / redeploy) ----------------
+  dry-run-manual:
+    needs: context
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/cd-reusable.yml
+    with:
+      environment: ${{ inputs.environment }}
+      mode: dry-run
+      git_sha: ${{ needs.context.outputs.sha }}
+      ref: ${{ needs.context.outputs.ref }}
+    secrets: inherit
+
+  deploy-manual:
+    needs: [context, dry-run-manual]
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/cd-reusable.yml
+    with:
+      environment: ${{ inputs.environment }}
+      mode: deploy
+      git_sha: ${{ needs.context.outputs.sha }}
+      ref: ${{ needs.context.outputs.ref }}
+    secrets: inherit
